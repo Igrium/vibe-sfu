@@ -51,6 +51,10 @@ dependencies {
     // Used by the ported ICE transport (InetAddresses); also an ice4j transitive dep
     implementation libs.guava
 
+    // SpotBugs annotations (SuppressFBWarnings etc.) used throughout upstream sources.
+    // compileOnly: annotations have no runtime retention needed here.
+    compileOnly 'com.github.spotbugs:spotbugs-annotations:4.8.6'
+
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

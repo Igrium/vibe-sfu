@@ -12,6 +12,16 @@ Status: **IN PROGRESS — vertical slice first (data-channel-only end-to-end), t
   depacketize/re-packetize in the common forward case. This is the core SFU contract
   and drives the `MediaTrack.onRtpPacket` / `sendRtp` API design.
 
+### Media path must support BOTH raw-forward and decode/reencode (2026-07-08, user — low priority/later)
+- Default & common case: hand the host the **decrypted RTP packet**, forward with no transcode.
+- But the structure must ALSO let an application **decode/re-encode** if it wants to. So:
+  - Keep upstream's codec parsers/depacketizers in the port (`nlj/codec/**`, `nlj/rtp/codec/**`,
+    `transform/node/RtpParser` etc.) rather than stripping them — they provide the decode entry points.
+  - Expose the media pipeline as **pluggable** (per the spec's "more exposed/pluggable media pipeline"):
+    the host can tap raw RTP OR insert processing nodes / receive parsed frames.
+  - `MediaTrack` API surface should offer a raw-RTP channel by default and leave room for a
+    parsed-frame / injectable-encoder channel. Design this when building the media layer, not the DC slice.
+
 ### Build environment notes (this sandbox)
 - `services.gradle.org` is policy-blocked → the Gradle wrapper (9.3.1) can't self-download.
   Use the system Gradle at `/opt/gradle/bin/gradle` (8.14.3) with JDK 21. The committed
@@ -185,6 +195,19 @@ Minimum required by spec plus the rest of a complete WebRTC lifecycle:
 14. `onError(Throwable)` — catch-all pipeline error.
 
 ---
+
+## 5b. Config defaults to preserve in the plain-Java config classes
+(From `jitsi-media-transform/.../reference.conf` — the metaconfig delegates become
+Java classes holding these as defaults, with programmatic overrides where the API needs them.)
+- **DTLS** (`jmt.dtls`): handshake-timeout = 30s; cipher-suites =
+  `[TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+  TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+  TLS_DHE_RSA_WITH_AES_128_GCM_SHA256]`; local-fingerprint-hash-function = sha-256;
+  accepted-fingerprint-hash-functions = `[sha-512, sha-384, sha-256, sha-1]`.
+- **SRTP** (`jmt.srtp`): max-consecutive-packets-discarded-early = -1; protection-profiles =
+  `[SRTP_AEAD_AES_128_GCM, SRTP_AES128_CM_HMAC_SHA1_80]`; factory-class = "OpenSSL".
+- **SCTP** (`videobridge.sctp`): enabled = true (slice needs it on); DEFAULT_SCTP_PORT = 5000;
+  DEFAULT_MAX_TIMER_DURATION = 3000ms; socket opts: maxRetransmissions/maxInitRetransmits = null (unlimited).
 
 ## 6. Deliverables checklist
 - [ ] `lib` builds with only real deps + ported videobridge code (no reimplementations).
