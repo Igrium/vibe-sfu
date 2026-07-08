@@ -1,0 +1,59 @@
+/*
+ * jitsi-sfu library module.
+ *
+ * Contains the Java translation of the jitsi-videobridge media pipeline
+ * (org.jitsi.rtp, org.jitsi.nlj, org.jitsi.videobridge.*) plus the new
+ * public API layer (com.igrium.sfu).
+ */
+
+plugins {
+    id 'java-library'
+}
+
+repositories {
+    mavenCentral()
+    // jitsi-dcsctp (dcsctp4j) is only published to the Jitsi maven repository.
+    maven {
+        name = 'JitsiMavenRepository'
+        url = 'https://github.com/jitsi/jitsi-maven-repository/raw/master/releases'
+        content {
+            includeGroup 'org.jitsi'
+        }
+    }
+}
+
+dependencies {
+    // ICE (STUN/TURN/candidate handling)
+    api 'org.jitsi:ice4j:3.2-15-g6da2b08'
+
+    // Logging, concurrency and misc utilities shared with upstream jitsi code
+    api 'org.jitsi:jitsi-utils:1.0-150-g4ab9a3b'
+
+    // SRTP/SRTCP crypto contexts
+    implementation 'org.jitsi:jitsi-srtp:1.1-23-gaf3cd06'
+
+    // SCTP (JNI wrapper around libwebrtc dcsctp; natives bundled for
+    // darwin-aarch64/x86-64 and linux x86-64/aarch64/ppc64le)
+    api 'org.jitsi:jitsi-dcsctp:1.0-7-gb548df2'
+
+    // DTLS
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.84'
+    implementation 'org.bouncycastle:bcpkix-jdk18on:1.84'
+    implementation 'org.bouncycastle:bctls-jdk18on:1.84'
+
+    api 'org.slf4j:slf4j-api:2.0.18'
+
+    testImplementation libs.junit.jupiter
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
