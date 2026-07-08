@@ -12,12 +12,14 @@ plugins {
 
 repositories {
     mavenCentral()
-    // jitsi-dcsctp (dcsctp4j) is only published to the Jitsi maven repository.
+    // jitsi-dcsctp (dcsctp4j) is only published to the Jitsi maven repository
+    // (raw.githubusercontent.com serves the same files as the github.com/.../raw/ path).
     maven {
         name = 'JitsiMavenRepository'
-        url = 'https://github.com/jitsi/jitsi-maven-repository/raw/master/releases'
+        url = 'https://raw.githubusercontent.com/jitsi/jitsi-maven-repository/master/releases'
         content {
-            includeGroup 'org.jitsi'
+            // Only jitsi-dcsctp needs this repo; the rest resolve from Maven Central.
+            includeModule 'org.jitsi', 'jitsi-dcsctp'
         }
     }
 }
@@ -42,6 +44,12 @@ dependencies {
     implementation 'org.bouncycastle:bctls-jdk18on:1.84'
 
     api 'org.slf4j:slf4j-api:2.0.18'
+
+    // Diagnostics / node-stats JSON (ported verbatim from jitsi-videobridge)
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+
+    // Used by the ported ICE transport (InetAddresses); also an ice4j transitive dep
+    implementation libs.guava
 
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
