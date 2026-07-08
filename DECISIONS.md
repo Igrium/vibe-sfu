@@ -209,6 +209,19 @@ Java classes holding these as defaults, with programmatic overrides where the AP
 - **SCTP** (`videobridge.sctp`): enabled = true (slice needs it on); DEFAULT_SCTP_PORT = 5000;
   DEFAULT_MAX_TIMER_DURATION = 3000ms; socket opts: maxRetransmissions/maxInitRetransmits = null (unlimited).
 
+## 5c. RESUME STATE (2026-07-08 ~18:35 UTC)
+Account-wide Claude session limit hit (resets 22:20 UTC), stopping the sonnet porting agents.
+Progress so far:
+- Build baseline green; deps resolve (Central + raw.githubusercontent for dcsctp4j).
+- `org.jitsi.rtp` port **~85% done** (63 Java files, committed as WIP `22c7826`). **Compile FAILS**:
+  the `rtcp/rtcpfb/**` subtree (11 files, ~1817 LOC — RtcpFbPacket, Unsupported, PLI/FIR/REMB,
+  NACK, TransportLayerRtcpFbPacket, PayloadSpecificRtcpFbPacket, ccfb/RtcpFbCcfbPacket,
+  tcc/LastChunk, tcc/RtcpFbTccPacket) is NOT yet ported; RtcpPacket.java references RtcpFbPacket.
+**Next actions (auto-resume scheduled for 22:25 UTC via send_later):**
+1. Sonnet agent → finish `rtcp/rtcpfb/**`, get `gradle :lib:compileJava` BUILD SUCCESSFUL. (task #1)
+2. Then task #2 (nlj dtls/srtp/node), #3 (jvb transport + datachannel), #4 (public API), #5 (demo+Playwright).
+Build with system gradle (`gradle`, not `./gradlew`). Config = plain Java, defaults in §5b.
+
 ## 6. Deliverables checklist
 - [ ] `lib` builds with only real deps + ported videobridge code (no reimplementations).
 - [ ] `testapp` module: demo SFU + HTML/JS client.
