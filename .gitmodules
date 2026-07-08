@@ -1,0 +1,12 @@
+[submodule "reference/ice4j"]
+	path = reference/ice4j
+	url = https://github.com/jitsi/ice4j.git
+[submodule "reference/jitsi-utils"]
+	path = reference/jitsi-utils
+	url = https://github.com/jitsi/jitsi-utils.git
+[submodule "reference/jitsi-srtp"]
+	path = reference/jitsi-srtp
+	url = https://github.com/jitsi/jitsi-srtp
+[submodule "reference/jitsi-videobridge"]
+	path = reference/jitsi-videobridge
+	url = https://github.com/jitsi/jitsi-videobridge.git
