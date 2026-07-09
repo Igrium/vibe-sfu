@@ -1,0 +1,42 @@
+/*
+ * Copyright @ 2019-Present 8x8, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.jitsi.nlj.format;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+public class OpusPayloadType extends AudioPayloadType
+{
+    public OpusPayloadType(byte pt)
+    {
+        this(pt, 48000, 2, new ConcurrentHashMap<>());
+    }
+
+    public OpusPayloadType(byte pt, int clockRate)
+    {
+        this(pt, clockRate, 2, new ConcurrentHashMap<>());
+    }
+
+    public OpusPayloadType(byte pt, int clockRate, int channels)
+    {
+        this(pt, clockRate, channels, new ConcurrentHashMap<>());
+    }
+
+    public OpusPayloadType(byte pt, int clockRate, int channels, Map<String, String> parameters)
+    {
+        super(pt, PayloadTypeEncoding.OPUS, clockRate, channels, parameters);
+    }
+}

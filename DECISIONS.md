@@ -209,18 +209,37 @@ Java classes holding these as defaults, with programmatic overrides where the AP
 - **SCTP** (`videobridge.sctp`): enabled = true (slice needs it on); DEFAULT_SCTP_PORT = 5000;
   DEFAULT_MAX_TIMER_DURATION = 3000ms; socket opts: maxRetransmissions/maxInitRetransmits = null (unlimited).
 
-## 5c. RESUME STATE (2026-07-08 ~18:35 UTC)
-Account-wide Claude session limit hit (resets 22:20 UTC), stopping the sonnet porting agents.
-Progress so far:
+## 5c. RESUME STATE (2026-07-08 ~19:30 UTC)
+Approaching session limit again; checkpointing before the break.
+
+**DONE and pushed:**
 - Build baseline green; deps resolve (Central + raw.githubusercontent for dcsctp4j).
-- `org.jitsi.rtp` port **~85% done** (63 Java files, committed as WIP `22c7826`). **Compile FAILS**:
-  the `rtcp/rtcpfb/**` subtree (11 files, ~1817 LOC — RtcpFbPacket, Unsupported, PLI/FIR/REMB,
-  NACK, TransportLayerRtcpFbPacket, PayloadSpecificRtcpFbPacket, ccfb/RtcpFbCcfbPacket,
-  tcc/LastChunk, tcc/RtcpFbTccPacket) is NOT yet ported; RtcpPacket.java references RtcpFbPacket.
-**Next actions (auto-resume scheduled for 22:25 UTC via send_later):**
-1. Sonnet agent → finish `rtcp/rtcpfb/**`, get `gradle :lib:compileJava` BUILD SUCCESSFUL. (task #1)
-2. Then task #2 (nlj dtls/srtp/node), #3 (jvb transport + datachannel), #4 (public API), #5 (demo+Playwright).
-Build with system gradle (`gradle`, not `./gradlew`). Config = plain Java, defaults in §5b.
+- **Task #1 COMPLETE** — `org.jitsi.rtp` fully ported to Java (incl. rtcp/rtcpfb subtree).
+  Committed `416cb5a`, pushed. `gradle :lib:compileJava` was BUILD SUCCESSFUL.
+
+**DONE, compiles, but PUSH PENDING (classifier outage blocked git):**
+- **Task #2 code COMPLETE** — nlj core slice ported to Java: 77 files under
+  `lib/src/main/java/org/jitsi/nlj/` = pipeline core (Node hierarchy, PacketInfo,
+  transform+visitors, stats/NodeStatsBlock, format/PayloadType*, util/Util+BufferPool),
+  `dtls/**` (10 files), `srtp/**` (12 files). Metaconfig replaced with plain-Java config
+  (DtlsConfig, SrtpConfig, PacketInfo flags) per §5b defaults. Agent verified
+  `gradle :lib:clean :lib:compileJava` → BUILD SUCCESSFUL.
+  Media-path nodes (RtpReceiver/Sender, incoming/outgoing, codec, simulcast) intentionally
+  EXCLUDED from this slice. `SetMediaSourcesEvent` omitted (pulls in out-of-scope MediaSourceDesc);
+  noted in `Event.java`.
+  **FIRST ACTION NEXT SESSION:** if `git log` doesn't already show the nlj commit, run:
+  `git add lib/src/main/java/org/jitsi/nlj/ && git commit && git push -u origin claude/jitsi-videobridge-library-port-meduv2`
+  (working tree has the 77 uncommitted files if not yet committed).
+
+**NEXT (task #3):** Port jvb transport into Java — `transport/ice/IceTransport`,
+`transport/dtls/DtlsTransport`, `dcsctp/DcSctp*` (DcSctpHandler/Transport wiring already read:
+DEFAULT_SCTP_PORT=5000, DEFAULT_MAX_TIMER_DURATION=3000ms, maxRetransmissions/maxInitRetransmits=null),
+`sctp/SctpConfig`, `ice/Harvesters`+`IceConfig`+`TransportUtils`, `util/ByteBufferPool`+`TaskPools`;
+copy `datachannel/**` (already Java) verbatim; strip conference/XMPP; de-Endpoint. Source under
+`reference/jitsi-videobridge/jvb/src/main/kotlin/org/jitsi/videobridge/`.
+Then #4 (com.igrium.sfu public API, data-channel slice) and #5 (testapp demo + Playwright).
+Build with system gradle (`/opt/gradle/bin/gradle`, not `./gradlew`). Config = plain Java, defaults §5b.
+Use sonnet background agents for bulk translation; one focused agent per layer; instruct "no sub-agents, don't commit".
 
 ## 6. Deliverables checklist
 - [ ] `lib` builds with only real deps + ported videobridge code (no reimplementations).
