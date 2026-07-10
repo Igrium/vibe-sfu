@@ -209,35 +209,49 @@ Java classes holding these as defaults, with programmatic overrides where the AP
 - **SCTP** (`videobridge.sctp`): enabled = true (slice needs it on); DEFAULT_SCTP_PORT = 5000;
   DEFAULT_MAX_TIMER_DURATION = 3000ms; socket opts: maxRetransmissions/maxInitRetransmits = null (unlimited).
 
-## 5c. RESUME STATE (2026-07-08 ~19:30 UTC)
-Approaching session limit again; checkpointing before the break.
+## 5c. RESUME STATE (2026-07-10)
 
 **DONE and pushed:**
 - Build baseline green; deps resolve (Central + raw.githubusercontent for dcsctp4j).
 - **Task #1 COMPLETE** — `org.jitsi.rtp` fully ported to Java (incl. rtcp/rtcpfb subtree).
-  Committed `416cb5a`, pushed. `gradle :lib:compileJava` was BUILD SUCCESSFUL.
+  Committed `416cb5a`.
+- **Task #2 COMPLETE** — nlj core slice, 77 files under `lib/src/main/java/org/jitsi/nlj/`:
+  pipeline core (Node hierarchy, PacketInfo, transform+visitors, stats, format, util),
+  `dtls/**`, `srtp/**`. Metaconfig → plain-Java config per §5b. Committed `9204617`.
+  Media-path nodes (RtpReceiver/Sender, incoming/outgoing, codec, simulcast) EXCLUDED
+  from this slice; `SetMediaSourcesEvent` omitted (noted in `Event.java`).
+- **Task #3 COMPLETE** — jvb transport ported, 29 files under
+  `lib/src/main/java/org/jitsi/videobridge/`:
+  - **Package decision:** kept upstream `org.jitsi.videobridge.*` packages (diffability),
+    overriding the earlier idea of moving to `org.jitsi.sfu.transport` (§1).
+  - **XMPP/jingle replaced** by plain DTOs in `org.jitsi.videobridge.transport`:
+    `IceCandidate` (Comparable: host<srflx<prflx<relay), `DtlsFingerprint`,
+    `TransportDescription` (ufrag/password/rtcpMux/candidates/fingerprints).
+    `IceTransport.describe()/startConnectivityEstablishment()` and
+    `DtlsTransport.describe()` now take `TransportDescription`.
+  - `transport/ice/IceTransport,IceStatistics`; `transport/dtls/DtlsTransport`;
+    `dcsctp/DcSctpTransport,DcSctpBaseCallbacks(own file),DcSctpHandler`;
+    plain-Java `sctp/SctpConfig` (enabled()=true, maxChannels=1) and `ice/IceConfig`
+    (public final fields: port=10000, ufragPrefix=null, keepAliveStrategy=selected_only,
+    resolveRemoteCandidates=false, nominationStrategy=NominateFirstHostOrReflexiveValid,
+    advertisePrivateCandidates=true); `ice/Harvesters` (lazy → getInstance()).
+  - Verbatim copies: `ice/TransportUtils`, `util/ByteBufferPool,PartitionedByteBufferPool,
+    TaskPools`, `datachannel/**` (13 files; only change: VideobridgeMetrics line removed
+    from DataChannelStack).
+  - Metrics counters (iceFailed/Succeeded/SucceededRelayed, rejectedDataChannels) stripped.
+  - Known deviations: `ByteBufferKt.toHex`→`ByteBufferExtensions.toHex`;
+    `UtilKt.getStackTrace`→`Util.getStackTrace`; `generateCandidateId` uses
+    `candidate.hashCode()` (upstream Kotlin buildString-receiver quirk not reproduced);
+    `BucketStats(thresholds, "", "")` explicit default args.
+  - `compileOnly org.jetbrains:annotations:24.1.0` added for verbatim Java files.
+  - `gradle :lib:compileJava` BUILD SUCCESSFUL (deprecation notes only).
 
-**DONE, compiles, but PUSH PENDING (classifier outage blocked git):**
-- **Task #2 code COMPLETE** — nlj core slice ported to Java: 77 files under
-  `lib/src/main/java/org/jitsi/nlj/` = pipeline core (Node hierarchy, PacketInfo,
-  transform+visitors, stats/NodeStatsBlock, format/PayloadType*, util/Util+BufferPool),
-  `dtls/**` (10 files), `srtp/**` (12 files). Metaconfig replaced with plain-Java config
-  (DtlsConfig, SrtpConfig, PacketInfo flags) per §5b defaults. Agent verified
-  `gradle :lib:clean :lib:compileJava` → BUILD SUCCESSFUL.
-  Media-path nodes (RtpReceiver/Sender, incoming/outgoing, codec, simulcast) intentionally
-  EXCLUDED from this slice. `SetMediaSourcesEvent` omitted (pulls in out-of-scope MediaSourceDesc);
-  noted in `Event.java`.
-  **FIRST ACTION NEXT SESSION:** if `git log` doesn't already show the nlj commit, run:
-  `git add lib/src/main/java/org/jitsi/nlj/ && git commit && git push -u origin claude/jitsi-videobridge-library-port-meduv2`
-  (working tree has the 77 uncommitted files if not yet committed).
-
-**NEXT (task #3):** Port jvb transport into Java — `transport/ice/IceTransport`,
-`transport/dtls/DtlsTransport`, `dcsctp/DcSctp*` (DcSctpHandler/Transport wiring already read:
-DEFAULT_SCTP_PORT=5000, DEFAULT_MAX_TIMER_DURATION=3000ms, maxRetransmissions/maxInitRetransmits=null),
-`sctp/SctpConfig`, `ice/Harvesters`+`IceConfig`+`TransportUtils`, `util/ByteBufferPool`+`TaskPools`;
-copy `datachannel/**` (already Java) verbatim; strip conference/XMPP; de-Endpoint. Source under
-`reference/jitsi-videobridge/jvb/src/main/kotlin/org/jitsi/videobridge/`.
-Then #4 (com.igrium.sfu public API, data-channel slice) and #5 (testapp demo + Playwright).
+**NEXT (task #4):** Build `com.igrium.sfu` public API (data-channel slice): SfuPeerConnection
+(offerer/answerer role), SfuPeerConnectionObserver (14 callbacks, §5), DataChannelTrack,
+transport-param plumbing over TransportDescription/IceCandidate/DtlsFingerprint. Wire
+IceTransport→DtlsTransport→DcSctpTransport→DataChannelStack the way upstream Endpoint.kt does
+(read `reference/.../videobridge/Endpoint.kt` for the wiring: setupIceTransport/setupDtlsTransport/
+createSctpConnection). Then #5 (testapp demo + Playwright).
 Build with system gradle (`/opt/gradle/bin/gradle`, not `./gradlew`). Config = plain Java, defaults §5b.
 Use sonnet background agents for bulk translation; one focused agent per layer; instruct "no sub-agents, don't commit".
 

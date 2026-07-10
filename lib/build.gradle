@@ -55,6 +55,10 @@ dependencies {
     // compileOnly: annotations have no runtime retention needed here.
     compileOnly 'com.github.spotbugs:spotbugs-annotations:4.8.6'
 
+    // JetBrains @NotNull/@Nullable used by the verbatim-copied jvb Java files
+    // (datachannel/**, util/**). compileOnly: no runtime retention needed.
+    compileOnly 'org.jetbrains:annotations:24.1.0'
+
     testImplementation libs.junit.jupiter
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
