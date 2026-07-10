@@ -176,6 +176,19 @@ public class RtpEncodingDesc
         this.layers = newLayers;
     }
 
+    /**
+     * (Library addition) Directly replace this encoding's layers, bypassing the eid-validation /
+     * nominal-height / inherit-from-old-layers logic performed by {@link #setLayers}. Mirrors upstream's
+     * Kotlin {@code internal var layers}, which callers in the same module (e.g. Vp8Parser: {@code enc.layers =
+     * newLayers}) assign to directly. {@code layers} itself can't be made accessible the same way in Java
+     * (package-private only reaches {@code org.jitsi.nlj}, not the {@code org.jitsi.nlj.rtp.codec.*} subpackages
+     * that need this), so this method exists to give those callers the same raw-assignment semantics.
+     */
+    public void setLayersDirect(RtpLayerDesc[] layers)
+    {
+        this.layers = layers;
+    }
+
     private static boolean allMatch(RtpLayerDesc[] layers, java.util.function.Predicate<RtpLayerDesc> predicate)
     {
         for (RtpLayerDesc layer : layers)
