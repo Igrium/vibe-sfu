@@ -246,12 +246,23 @@ Java classes holding these as defaults, with programmatic overrides where the AP
   - `compileOnly org.jetbrains:annotations:24.1.0` added for verbatim Java files.
   - `gradle :lib:compileJava` BUILD SUCCESSFUL (deprecation notes only).
 
-**NEXT (task #4):** Build `com.igrium.sfu` public API (data-channel slice): SfuPeerConnection
-(offerer/answerer role), SfuPeerConnectionObserver (14 callbacks, §5), DataChannelTrack,
-transport-param plumbing over TransportDescription/IceCandidate/DtlsFingerprint. Wire
-IceTransport→DtlsTransport→DcSctpTransport→DataChannelStack the way upstream Endpoint.kt does
-(read `reference/.../videobridge/Endpoint.kt` for the wiring: setupIceTransport/setupDtlsTransport/
-createSctpConnection). Then #5 (testapp demo + Playwright).
+- **Task #4 COMPLETE** — `com.igrium.sfu` public API (data-channel slice):
+  `SfuPeerConnection` (Role.OFFERER/ANSWERER; getLocalDescription/setRemoteDescription/
+  addRemoteCandidate/createDataChannel/close; wiring mirrors upstream Endpoint/Relay:
+  ICE looksLikeDtls→DtlsTransport; DTLS app data→DcSctpHandler→DcSctpTransport; SCTP out→
+  sendDtlsData; DTLS CLIENT initiates sctp connect(); DCEP on sequential PacketInfoQueue),
+  `SfuPeerConnectionObserver` (default-method callbacks; media callbacks deferred to media
+  phase), `DataChannelTrack`, `DataChannelOptions` (ordered/maxRetransmits/lifetime→DCEP
+  channelType per RFC 8832; sid parity: DTLS client=even), `IceConnectionState`.
+  Remote "actpass" setup → we answer active (mapped to setSetupAttribute("passive")).
+  Support ports added: `videobridge/util/PacketUtils`, `videobridge/TransportConfig`
+  (queueSize=1024), `nlj/util/PacketInfoQueue`. Library-facing additions (marked in-source):
+  `DataChannel.getSid/getLabel/sendBinary`, `SctpConfig.setMaxChannels` (default stays 1).
+
+**NEXT (task #5):** testapp Gradle module: demo SFU (uses com.igrium.sfu, minimal HTTP server
+serving HTML/JS client + signalling over websocket or HTTP POST; browser SDP↔TransportDescription
+mapping lives in testapp, lib stays SDP-free), then Playwright-MCP verification: two browser
+contexts, ICE connected, no DTLS errors, data channel open + round-trip through the SFU.
 Build with system gradle (`/opt/gradle/bin/gradle`, not `./gradlew`). Config = plain Java, defaults §5b.
 Use sonnet background agents for bulk translation; one focused agent per layer; instruct "no sub-agents, don't commit".
 

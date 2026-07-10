@@ -27,7 +27,12 @@ public class SctpConfig
     /** Whether SCTP should be signaled or used when signaled to us */
     private final boolean enabled = true;
 
-    private final int maxChannels = 1;
+    /**
+     * Maximum number of data channels per connection. Upstream default is 1; unlike upstream
+     * this is settable, because library hosts may want more than the single channel the
+     * videobridge itself uses.
+     */
+    private volatile int maxChannels = 1;
 
     private SctpConfig()
     {
@@ -41,5 +46,10 @@ public class SctpConfig
     public int getMaxChannels()
     {
         return maxChannels;
+    }
+
+    public void setMaxChannels(int maxChannels)
+    {
+        this.maxChannels = maxChannels;
     }
 }

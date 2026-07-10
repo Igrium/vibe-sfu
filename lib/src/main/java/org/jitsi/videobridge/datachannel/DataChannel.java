@@ -86,6 +86,24 @@ public class DataChannel
     }
 
     /**
+     * The SCTP stream id used by this data channel.
+     * (Library addition: exposes the protected field for the public API layer.)
+     */
+    public int getSid()
+    {
+        return sid;
+    }
+
+    /**
+     * The label of this data channel.
+     * (Library addition: exposes the protected field for the public API layer.)
+     */
+    public String getLabel()
+    {
+        return label;
+    }
+
+    /**
      * Sets the listener for data channel events.
      * @param listener
      */
@@ -151,5 +169,16 @@ public class DataChannel
         }
         DataChannelStringMessage stringMessage = new DataChannelStringMessage(message);
         dataChannelDataSender.send(stringMessage.getBuffer(), sid, DataChannelProtocolConstants.WEBRTC_PPID_STRING);
+    }
+
+    /**
+     * Sends binary data through this data channel.
+     * (Library addition, mirroring {@link #sendString(String)}.)
+     * @param data the bytes to send.
+     */
+    public void sendBinary(byte[] data)
+    {
+        DataChannelBinaryMessage binaryMessage = new DataChannelBinaryMessage(data);
+        dataChannelDataSender.send(binaryMessage.getBuffer(), sid, DataChannelProtocolConstants.WEBRTC_PPID_BIN);
     }
 }
