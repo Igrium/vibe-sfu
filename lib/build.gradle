@@ -45,8 +45,9 @@ dependencies {
 
     api 'org.slf4j:slf4j-api:2.0.18'
 
-    // Diagnostics / node-stats JSON (ported verbatim from jitsi-videobridge)
-    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
+    // Diagnostics / node-stats JSON (ported verbatim from jitsi-videobridge).
+    // api: debug-state methods (e.g. SfuPeerConnection.getDebugState) return Jackson nodes.
+    api 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
 
     // Used by the ported ICE transport (InetAddresses); also an ice4j transitive dep
     implementation libs.guava

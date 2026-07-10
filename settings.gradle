@@ -12,3 +12,4 @@ plugins {
 
 rootProject.name = 'vibe-sfu'
 include('lib')
+include('testapp')

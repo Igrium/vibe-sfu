@@ -31,8 +31,6 @@ import java.util.List;
  */
 public class DtlsConfig
 {
-    public static final DtlsConfig config = new DtlsConfig();
-
     private static final List<String> DEFAULT_CIPHER_SUITES = Arrays.asList(
         "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
         "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
@@ -46,6 +44,10 @@ public class DtlsConfig
     );
 
     private static final String DEFAULT_LOCAL_FINGERPRINT_HASH_FUNCTION = "sha-256";
+
+    // NOTE: must be declared after the DEFAULT_* fields above — the constructor reads them,
+    // and static initializers run in declaration order.
+    public static final DtlsConfig config = new DtlsConfig();
 
     private final Duration handshakeTimeout;
     private final List<Integer> cipherSuites;

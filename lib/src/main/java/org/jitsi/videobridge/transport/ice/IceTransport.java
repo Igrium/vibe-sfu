@@ -62,6 +62,29 @@ import java.util.concurrent.atomic.LongAdder;
  */
 public class IceTransport
 {
+    static
+    {
+        // Upstream jitsi-videobridge ships these ice4j overrides in its application.conf
+        // (jvb/src/main/resources/application.conf). This library has no HOCON application
+        // config, so apply the same defaults programmatically (hosts can still override by
+        // setting the properties before this class loads):
+        // - Components must not additionally gather dynamic-port host candidates: those
+        //   sockets have no reader when the push API (single port harvester) is in use.
+        // - Link-local addresses are not useful to advertise.
+        if (System.getProperty("ice4j.harvest.udp.use-dynamic-ports") == null)
+        {
+            System.setProperty("ice4j.harvest.udp.use-dynamic-ports", "false");
+        }
+        if (System.getProperty("ice4j.harvest.use-link-local-addresses") == null)
+        {
+            System.setProperty("ice4j.harvest.use-link-local-addresses", "false");
+        }
+        // Upstream sets this in Main.kt (stripped from this library): incoming data on the
+        // single port harvester is pushed to Component.setBufferCallback instead of being
+        // queued on a DatagramSocket nobody reads.
+        org.ice4j.ice.harvest.AbstractUdpListener.USE_PUSH_API = true;
+    }
+
     private final Logger logger;
 
     /**

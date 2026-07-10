@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>jitsi-sfu demo client</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; }
+  #log { border: 1px solid #ccc; padding: 0.5rem; min-height: 8rem; white-space: pre-line; }
+  .ok { color: #070; }
+  .err { color: #a00; }
+</style>
+</head>
+<body>
+<h1>jitsi-sfu demo client</h1>
+<p>Peer name: <b id="name"></b> &mdash; ICE: <b id="ice">new</b> &mdash; data channel: <b id="dc">closed</b></p>
+<div id="log"></div>
+<script>
+"use strict";
+
+// State inspected by the Playwright end-to-end test.
+window.testState = {
+    name: new URLSearchParams(location.search).get("name") || ("peer" + Math.floor(Math.random() * 1000)),
+    ice: "new",
+    dcOpen: false,
+    messages: [],
+    errors: []
+};
+
+const logDiv = document.getElementById("log");
+function log(cls, text) {
+    const line = document.createElement("div");
+    line.className = cls;
+    line.textContent = text;
+    logDiv.appendChild(line);
+}
+
+document.getElementById("name").textContent = testState.name;
+
+const pc = new RTCPeerConnection();
+const dc = pc.createDataChannel("chat");
+
+pc.oniceconnectionstatechange = () => {
+    testState.ice = pc.iceConnectionState;
+    document.getElementById("ice").textContent = pc.iceConnectionState;
+    log("", "ICE state: " + pc.iceConnectionState);
+};
+
+dc.onopen = () => {
+    testState.dcOpen = true;
+    document.getElementById("dc").textContent = "open";
+    log("ok", "data channel open");
+};
+dc.onclose = () => {
+    testState.dcOpen = false;
+    document.getElementById("dc").textContent = "closed";
+};
+dc.onmessage = (e) => {
+    testState.messages.push(e.data);
+    log("ok", "received: " + e.data);
+};
+dc.onerror = (e) => {
+    testState.errors.push(String(e.error || e));
+    log("err", "data channel error: " + (e.error || e));
+};
+
+// Used by the test to send a message through the SFU.
+window.sendMessage = (text) => dc.send(text);
+
+function waitForGathering(pc) {
+    if (pc.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise((resolve) => {
+        pc.addEventListener("icegatheringstatechange", () => {
+            if (pc.iceGatheringState === "complete") resolve();
+        });
+        // Don't wait forever; host candidates are enough for a local test.
+        setTimeout(resolve, 2000);
+    });
+}
+
+(async () => {
+    try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitForGathering(pc);
+        const resp = await fetch("/offer", { method: "POST", body: pc.localDescription.sdp });
+        if (!resp.ok) throw new Error("offer failed: HTTP " + resp.status + " " + await resp.text());
+        const answerSdp = await resp.text();
+        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+        log("", "answer applied, connecting…");
+    } catch (e) {
+        testState.errors.push(String(e));
+        log("err", String(e));
+    }
+})();
+</script>
+</body>
+</html>

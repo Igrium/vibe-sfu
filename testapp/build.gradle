@@ -1,0 +1,39 @@
+/*
+ * Demo SFU test application.
+ *
+ * A minimal SFU built on the jitsi-sfu library (`lib`): serves a browser test
+ * client over HTTP, answers WebRTC offers (data-channel only) and relays data
+ * channel messages between all connected peers.
+ */
+
+plugins {
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+    // jitsi-dcsctp (a transitive dep of :lib) is only published to the Jitsi maven repository.
+    maven {
+        name = 'JitsiMavenRepository'
+        url = 'https://raw.githubusercontent.com/jitsi/jitsi-maven-repository/master/releases'
+        content {
+            includeModule 'org.jitsi', 'jitsi-dcsctp'
+        }
+    }
+}
+
+dependencies {
+    implementation project(':lib')
+    // Simple console logging for the demo
+    implementation 'org.slf4j:slf4j-simple:2.0.18'
+}
+
+application {
+    mainClass = 'com.igrium.sfu.testapp.DemoSfu'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
