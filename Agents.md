@@ -42,6 +42,12 @@ DECISIONS.md                ← decision log + porting resume state
   ported layer, one bug fix verified, one doc update). Push to the designated feature
   branch with `git push -u origin <branch>`. Don't let finished work sit uncommitted:
   the dev sandbox is ephemeral.
+- **Don't re-verify verified work.** When delegating to a subagent, paste the exact
+  signatures/facts it needs into the prompt instead of sending it to re-read
+  already-ported files, and tell it to trust them. Subagents compile once at the end at
+  most; the orchestrator's own final `gradle :lib:compileJava` before committing is the
+  verification of record. Reports cover exceptions (deviations, skips), not restatements
+  of what went as instructed.
 
 ## The porting rules (do not break these)
 
