@@ -13,8 +13,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jitsi.nlj;
+package org.jitsi.nlj.util;
 
-public interface Event
+import java.util.concurrent.ConcurrentLinkedQueue;
+
+public class EvictingConcurrentQueue<T> extends ConcurrentLinkedQueue<T>
 {
+    private final int maxSize;
+
+    public EvictingConcurrentQueue(int maxSize)
+    {
+        this.maxSize = maxSize;
+    }
+
+    @Override
+    public boolean add(T element)
+    {
+        boolean result = super.add(element);
+        if (size() > maxSize)
+        {
+            // We check on every add, so we can't be more than 1 over the max size
+            poll();
+        }
+        return result;
+    }
 }

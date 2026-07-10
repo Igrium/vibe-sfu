@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2018 - Present, 8x8 Inc
+ * Copyright @ 2018 - present 8x8, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,8 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.jitsi.nlj;
 
-public interface Event
+public interface AudioLevelListener
 {
+    /**
+     * Process the audio level from a received audio RTP packet.
+     *
+     * @param sourceSsrc The SSRC identifying the source of the audio stream.
+     * @param level The audio level.
+     * @return A boolean set to {@code true} if this packet should be
+     * discarded without being forwarded to other endpoints.
+     */
+    boolean onLevelReceived(long sourceSsrc, long level);
 }

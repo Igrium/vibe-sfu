@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2018 - Present, 8x8 Inc
+ * Copyright @ 2018 - present 8x8, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,8 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jitsi.nlj;
 
-public interface Event
+package org.jitsi.nlj.util;
+
+import org.jitsi.nlj.rtp.SsrcAssociationType;
+
+/**
+ * A {@link RemoteSsrcAssociation} is an SSRC association which belongs to
+ * another endpoint; i.e. the processor of a {@link RemoteSsrcAssociation}
+ * does not 'own' the SSRCs signaled in the association.
+ */
+public class RemoteSsrcAssociation extends SsrcAssociation
 {
+    public RemoteSsrcAssociation(long primarySsrc, long secondarySsrc, SsrcAssociationType type)
+    {
+        super(primarySsrc, secondarySsrc, type);
+    }
 }

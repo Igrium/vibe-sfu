@@ -15,6 +15,24 @@
  */
 package org.jitsi.nlj;
 
-public interface Event
+public class SetMediaSourcesEvent implements Event
 {
+    private final MediaSourceDesc[] mediaSourceDescs;
+    private final MediaSourceDesc[] signaledMediaSourceDescs;
+
+    public SetMediaSourcesEvent(MediaSourceDesc[] mediaSourceDescs, MediaSourceDesc[] signaledMediaSourceDescs)
+    {
+        this.mediaSourceDescs = mediaSourceDescs;
+        this.signaledMediaSourceDescs = signaledMediaSourceDescs;
+    }
+
+    public MediaSourceDesc[] getMediaSourceDescs()
+    {
+        return mediaSourceDescs;
+    }
+
+    public MediaSourceDesc[] getSignaledMediaSourceDescs()
+    {
+        return signaledMediaSourceDescs;
+    }
 }

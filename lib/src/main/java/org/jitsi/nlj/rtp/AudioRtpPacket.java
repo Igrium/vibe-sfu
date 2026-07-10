@@ -13,8 +13,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jitsi.nlj;
+package org.jitsi.nlj.rtp;
 
-public interface Event
+import org.jitsi.rtp.rtp.RtpPacket;
+
+public class AudioRtpPacket extends RtpPacket
 {
+    public AudioRtpPacket(byte[] buffer, int offset, int length)
+    {
+        super(buffer, offset, length);
+    }
+
+    @Override
+    public AudioRtpPacket clone()
+    {
+        AudioRtpPacket clone = new AudioRtpPacket(
+            cloneBuffer(BYTES_TO_LEAVE_AT_START_OF_PACKET),
+            BYTES_TO_LEAVE_AT_START_OF_PACKET,
+            length
+        );
+        postClone(clone);
+        return clone;
+    }
 }

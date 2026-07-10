@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2018 - Present, 8x8 Inc
+ * Copyright @ 2018 - present 8x8, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,8 +13,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jitsi.nlj;
 
-public interface Event
+package org.jitsi.nlj.util;
+
+import java.time.Instant;
+
+public class InstantUtils
 {
+    public static Instant latest(Instant... instants)
+    {
+        Instant result = instants[0];
+        for (int i = 1; i < instants.length; i++)
+        {
+            if (instants[i].isAfter(result))
+            {
+                result = instants[i];
+            }
+        }
+        return result;
+    }
 }
