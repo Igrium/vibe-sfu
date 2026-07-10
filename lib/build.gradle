@@ -49,6 +49,10 @@ dependencies {
     // api: debug-state methods (e.g. SfuPeerConnection.getDebugState) return Jackson nodes.
     api 'com.fasterxml.jackson.core:jackson-databind:2.18.2'
 
+    // Debug pcap capture (ToggleablePcapWriter, ported from jitsi-media-transform)
+    implementation 'org.pcap4j:pcap4j-core:1.8.2'
+    implementation 'org.pcap4j:pcap4j-packetfactory-static:1.8.2'
+
     // Used by the ported ICE transport (InetAddresses); also an ice4j transitive dep
     implementation libs.guava
 
