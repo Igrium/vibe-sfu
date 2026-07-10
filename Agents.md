@@ -35,6 +35,14 @@ reference/jitsi-videobridge ← upstream source (READ-ONLY reference for porting
 DECISIONS.md                ← decision log + porting resume state
 ```
 
+## Workflow rules
+
+- **Commit and push after every completed feature or step** — at minimum once per work
+  session, ideally more. A "step" is anything that compiles and stands on its own (one
+  ported layer, one bug fix verified, one doc update). Push to the designated feature
+  branch with `git push -u origin <branch>`. Don't let finished work sit uncommitted:
+  the dev sandbox is ephemeral.
+
 ## The porting rules (do not break these)
 
 1. **Port, don't redesign.** Keep upstream package names, class names, method names,
