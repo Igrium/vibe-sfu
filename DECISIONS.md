@@ -273,12 +273,30 @@ Java classes holding these as defaults, with programmatic overrides where the AP
   stays SDP-free, nothing in com.igrium.sfu depends on it.
 - README.md (full public API reference) and Agents.md written.
 
-**NEXT (media phase):** port nlj media-path (RtpReceiver/Sender, incoming/outgoing node
-chains, Transceiver, rtcp/, codec/ VP8/VP9/AV1/H264, MediaSourceDesc/RtpLayerDesc,
-bandwidthestimation2/ + TransportCcEngine), then jvb cc/ (BitrateController etc.), then
-extend com.igrium.sfu with MediaTrack (onRtpPacket forwarding + sendRtp injection) and
-media observer callbacks; wire transceiver.setSrtpInformation at the TODO in
-SfuPeerConnection.setupDtlsTransport and route non-DTLS ICE traffic to the transceiver.
+**MEDIA PHASE progress** (roadmap M1-M8 in task list; one commit per step):
+- **M1 DONE** (`97abb6f`) — nlj util/rtp-types/MediaSourceDesc/stats foundation (45 files).
+  BitrateCalculator window/bucket defaults hardcoded w/ TODO(port) markers.
+- **M2 DONE** (`c8af3af`) — codec parsing: VP8/VP9/AV1 packets+parsers, Av1 dependency
+  descriptor reader, verbatim DePacketizers (org.jitsi_modified). RtpEncodingDesc gained
+  setLayersDirect (library addition replacing Kotlin internal-field access).
+- **M3 DONE** (`c7d1360`) — rtcp/ handlers (KeyframeRequester, NackHandler, RembHandler,
+  RetransmissionRequester, RtcpEventNotifier, Compound/SingleRtcpParser) + common nodes
+  (RtpParser, PacketParser, PacketCacher, PacketLossNode, PacketStreamStatsNode,
+  SrtpTransformerNode+subnodes, AudioRedHandler, Pcap writers; pcap4j dep added).
+- **M4 NEXT** — transform/node/incoming/** + rtp/bandwidthestimation(2)/** (29 files) +
+  TransportCcEngine/ClassicTransportCcEngine/LossListener + **rtcp/RtcpRrGenerator**
+  (deferred from M3, needs IncomingStatisticsTracker).
+- **M5** — transform/node/outgoing/** + ResumableStreamRewriter + **rtcp/RtcpSrUpdater**
+  (deferred from M3, needs OutgoingStatisticsTracker).
+- **M6** — Transceiver, RtpReceiver(Impl), RtpSender(Impl), stats/EndpointConnectionStats
+  + TransceiverStats (deferred from M1).
+- **M7** — jvb cc/** (BitrateController, allocation/, vp8/vp9/av1 frame projection).
+- **M8** — MediaTrack public API (onRtpPacket forwarding + sendRtp injection), media
+  observer callbacks, wire transceiver.setSrtpInformation at the TODO in
+  SfuPeerConnection.setupDtlsTransport, route non-DTLS ICE data to transceiver, SdpUtils
+  audio/video m-lines, testapp media demo + Playwright (fake media device) verification.
+Workflow: dispatch one sonnet agent per step with facts inlined (see Agents.md "Don't
+re-verify verified work"); orchestrator verifies compile, commits, pushes.
 Build with system gradle (`/opt/gradle/bin/gradle`, not `./gradlew`). Config = plain Java, defaults §5b.
 Use sonnet background agents for bulk translation; one focused agent per layer; instruct "no sub-agents, don't commit".
 
