@@ -259,10 +259,26 @@ Java classes holding these as defaults, with programmatic overrides where the AP
   (queueSize=1024), `nlj/util/PacketInfoQueue`. Library-facing additions (marked in-source):
   `DataChannel.getSid/getLabel/sendBinary`, `SctpConfig.setMaxChannels` (default stays 1).
 
-**NEXT (task #5):** testapp Gradle module: demo SFU (uses com.igrium.sfu, minimal HTTP server
-serving HTML/JS client + signalling over websocket or HTTP POST; browser SDP↔TransportDescription
-mapping lives in testapp, lib stays SDP-free), then Playwright-MCP verification: two browser
-contexts, ICE connected, no DTLS errors, data channel open + round-trip through the SFU.
+- **Task #5 COMPLETE** — testapp demo SFU (JDK HttpServer, POST /offer signalling, /debug
+  diagnostics endpoint, HTML/JS client) + **Playwright E2E PASS**: two Chromium contexts,
+  ICE connected, DTLS complete (server log clean), data channel open, string round-trip
+  through the SFU in both directions. Runtime bugs found & fixed during verification:
+  (1) DtlsConfig static-init ordering (singleton constructed before DEFAULT_* fields);
+  (2) ice4j needs `AbstractUdpListener.USE_PUSH_API=true` (upstream sets in Main.kt) plus
+  `ice4j.harvest.udp.use-dynamic-ports=false` / `use-link-local-addresses=false` (upstream
+  application.conf) — now applied in IceTransport's static initializer;
+  (3) jackson moved to `api` scope (getDebugState returns ObjectNode).
+  Per user request, SDP glue promoted from testapp into the lib as optional
+  `com.igrium.sfu.sdp.SdpUtils` (parse/buildOffer/buildAnswer/parseCandidate) — core API
+  stays SDP-free, nothing in com.igrium.sfu depends on it.
+- README.md (full public API reference) and Agents.md written.
+
+**NEXT (media phase):** port nlj media-path (RtpReceiver/Sender, incoming/outgoing node
+chains, Transceiver, rtcp/, codec/ VP8/VP9/AV1/H264, MediaSourceDesc/RtpLayerDesc,
+bandwidthestimation2/ + TransportCcEngine), then jvb cc/ (BitrateController etc.), then
+extend com.igrium.sfu with MediaTrack (onRtpPacket forwarding + sendRtp injection) and
+media observer callbacks; wire transceiver.setSrtpInformation at the TODO in
+SfuPeerConnection.setupDtlsTransport and route non-DTLS ICE traffic to the transceiver.
 Build with system gradle (`/opt/gradle/bin/gradle`, not `./gradlew`). Config = plain Java, defaults §5b.
 Use sonnet background agents for bulk translation; one focused agent per layer; instruct "no sub-agents, don't commit".
 
