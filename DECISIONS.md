@@ -1,3 +1,4 @@
+
 # vibe-sfu — Implementation Plan & Decision Log
 
 Port of the `jitsi-videobridge` media pipeline into a standalone, programmatic
@@ -378,7 +379,6 @@ Use sonnet background agents for bulk translation; one focused agent per layer; 
 4. srtp+dtls wrappers → 5. Transceiver/Receiver/Sender → 6. rtcp+codec+BWE →
 7. jvb transport (ice/dtls/sctp) + data channels → 8. cc/bitrate → 9. `com.igrium.sfu` public API →
 10. `testapp` demo + client → 11. Playwright verification → 12. README/Javadoc/Agents.md.
-```
 
 ## 8. M8 comprehensive implementation plan (media path + public API + e2e)
 
@@ -448,7 +448,7 @@ New/edited files: `MediaTrack.java`, `MediaStreamType`/`MediaKind` enum (audio|v
 - Payload-type construction uses the already-ported `org.jitsi.nlj.format.*` (Vp8/Vp9/Av1/H264/Opus/…)
   + `RtpExtension`/`RtpExtensionType`.
 
-### 8.4 Phase C — SDP helpers (`com.igrium.sfu.sdp.SdpUtils`)
+### 8.4 Phase C — SDP helpers (`com.igrium.sfu.sdp.SdpUtils`)https://claude.ai/
 - Extend the existing `SdpUtils` (data-channel/transport only today) with **audio/video m-line**
   generation + parsing, staying LOOSELY coupled (standing rule: "if videobridge didn't have it,
   don't over-integrate"). Parse the browser offer's `m=audio`/`m=video`: payload types (rtpmap/fmtp),
