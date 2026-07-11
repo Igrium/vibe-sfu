@@ -18,11 +18,15 @@ import org.jitsi.dcsctp4j.DcSctpMessage;
 import org.jitsi.dcsctp4j.ErrorKind;
 import org.jitsi.dcsctp4j.SendPacketStatus;
 import org.jitsi.dcsctp4j.SendStatus;
+import org.jitsi.nlj.MediaSourceDesc;
 import org.jitsi.nlj.PacketInfo;
+import org.jitsi.nlj.RtpEncodingDesc;
+import org.jitsi.nlj.RtpLayerDesc;
 import org.jitsi.nlj.Transceiver;
 import org.jitsi.nlj.TransceiverEventHandler;
 import org.jitsi.nlj.format.PayloadType;
 import org.jitsi.nlj.rtp.RtpExtension;
+import org.jitsi.nlj.rtp.codec.vpx.VpxRtpLayerDesc;
 import org.jitsi.nlj.srtp.TlsRole;
 import org.jitsi.nlj.util.Bandwidth;
 import org.jitsi.nlj.util.PacketInfoQueue;
@@ -128,6 +132,16 @@ public class SfuPeerConnection implements Closeable
 
     /** Receive tracks keyed by SSRC, so incoming RTP can be dispatched to the right listener. */
     private final Map<Long, MediaTrack> receiveTracks = new ConcurrentHashMap<>();
+
+    /**
+     * Minimal (non-simulcast) {@link MediaSourceDesc}s for video receive tracks, one per SSRC
+     * registered via {@link #addReceiveTrack}. The video receive pipeline
+     * ({@code VideoQualityLayerLookup}) drops packets whose SSRC doesn't resolve to a layer here
+     * — unlike audio, a bare {@code addReceiveSsrc} isn't enough for video passthrough. Rebuilt
+     * and re-pushed to the transceiver (via {@code setMediaSources}, which replaces the whole
+     * set) each time a video receive track is added.
+     */
+    private final List<MediaSourceDesc> videoReceiveSources = new ArrayList<>();
 
     /**
      * Enforces sequential processing of incoming data channel messages to maintain
@@ -384,9 +398,27 @@ public class SfuPeerConnection implements Closeable
             transceiver.addRtpExtension(extension);
         }
         transceiver.addReceiveSsrc(ssrc, kind.toMediaType());
+        if (kind == MediaKind.VIDEO)
+        {
+            registerVideoReceiveSource(ssrc);
+        }
         MediaTrack track = new MediaTrack(this, kind, ssrc, /* local = */ false);
         receiveTracks.put(ssrc, track);
         return track;
+    }
+
+    /**
+     * Registers a minimal single-layer (non-simulcast) {@link MediaSourceDesc} for a video
+     * receive SSRC and pushes the full accumulated set to the transceiver. Required for the
+     * incoming video pipeline to resolve a packet's encoding (see {@link #videoReceiveSources}).
+     */
+    private synchronized void registerVideoReceiveSource(long ssrc)
+    {
+        RtpLayerDesc layer = new VpxRtpLayerDesc(0, 0, 0, RtpLayerDesc.NO_HEIGHT, RtpLayerDesc.NO_FRAME_RATE);
+        RtpEncodingDesc encoding = new RtpEncodingDesc(ssrc, new RtpLayerDesc[] { layer });
+        MediaSourceDesc source = new MediaSourceDesc(new RtpEncodingDesc[] { encoding }, id, "video-" + ssrc);
+        videoReceiveSources.add(source);
+        transceiver.setMediaSources(videoReceiveSources.toArray(new MediaSourceDesc[0]));
     }
 
     /**

@@ -4,7 +4,7 @@
 Port of the `jitsi-videobridge` media pipeline into a standalone, programmatic
 Java SFU library (`webrtc-java`-style API), with conference/XMPP/REST stripped.
 
-Status: **IN PROGRESS — vertical slice first (data-channel-only end-to-end), then fill out full media pipeline. Full port remains the end goal.**
+Status: **MILESTONES M1–M8 COMPLETE — the full jitsi-videobridge media pipeline is ported (RTP/RTCP, codec parsing, BWE/TCC, bitrate controller + frame projection, Transceiver) and wired behind the `com.igrium.sfu` API; audio/video forwarding is proven end-to-end through a real browser (Playwright fake-media e2e). Follow-ups: docs polish, two-peer forwarding demo, and opportunistic wiring of the M1 BitrateCalculator TODO markers.**
 
 ### Media forwarding requirement (2026-07-08, user)
 - Client/host apps **must be able to forward audio/video streams directly without
@@ -329,9 +329,22 @@ Java classes holding these as defaults, with programmatic overrides where the AP
     serialization on ReceiverVideoConstraintsMessage (plain data holder), jitsi-metaconfig configs
     →reference.conf defaults (videobridge.cc.*). Multi-public-class Kotlin files split out
     (MediaSourceContainer, BitrateControllerStatusSnapshot).
-- **M8 (ONLY remaining step)** — public media API + wiring + e2e. This is integration +
-  runtime-debug work (NOT bulk translation); drive it in the orchestrator, verify with the
-  running testapp + Playwright. Concrete plan / facts gathered (2026-07-11):
+- **M8 DONE (port complete)** — public media API + wiring + e2e all green. Phase A: Transceiver
+  created per SfuPeerConnection, SRTP handed over on DTLS completion, inbound SRTP routed to the
+  receive pipeline, outbound encrypted RTP sent over ICE. Phase B: public MediaTrack/MediaKind API
+  (addReceiveTrack/createSendTrack, onRtpPacket/sendRtp) — the raw-RTP forward contract, no
+  transcode. Bugfix: video receive requires a minimal single-layer MediaSourceDesc via
+  setMediaSources (VideoQualityLayerLookup drops video whose SSRC has no encoding; audio has no
+  such gate) — SfuPeerConnection.registerVideoReceiveSource. Phase C: SdpUtils gained audio/video
+  m-line parse + answer generation, kept SDP-plain-data only (no org.jitsi.nlj import); the
+  Codec→PayloadType / Extmap→RtpExtension mapping lives in the testapp. Phase D: testapp loopback
+  demo (getUserMedia audio+video, SFU echoes RTP back on its own SSRCs) + /debug forward counter.
+  Phase E: scratchpad/e2e-media.js (Playwright, fake devices) — PASS: ICE connected, ontrack
+  audio+video, inbound-rtp bytesReceived/packetsReceived > 0 both kinds, server forward counter
+  nonzero. Data-channel e2e still green (no regression). Known cosmetic: a benign upstream-ported
+  "Received feedback before packet ... was indicated as sent" SEVERE log burst under the artificial
+  SSRC-reuse loopback (TCC/BWE accounting) — no exceptions, no effect on media; not chased.
+  Detailed original plan/facts (2026-07-11):
   1. **Create a Transceiver in SfuPeerConnection.** Ctor:
      `Transceiver(String id, ExecutorService recvExec, ExecutorService sendExec,
      ScheduledExecutorService bgExec, DiagnosticContext, Logger, TransceiverEventHandler,
