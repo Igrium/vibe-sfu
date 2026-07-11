@@ -314,7 +314,20 @@ Java classes holding these as defaults, with programmatic overrides where the AP
   as RuntimeException (same as SrtpTransformerNode). Also restored RembHandler's
   BandwidthListener/addListener plumbing (an M4b TODO(port) — TransportCcEngine now exists), so
   RtpReceiverImpl forwards REMB-derived bandwidth to its event handler. No M7/M8 seams needed.
-- **M7** — jvb cc/** (BitrateController, allocation/, vp8/vp9/av1 frame projection).
+- **M7 DONE** — jvb cc/** (bitrate controller + frame projection). Split M7a (`c0bdf74`) + M7b.
+  - M7a: cc/ projection base (AdaptiveSourceProjection(+Context), Generic..., RewriteException,
+    RtpState) + vp8/ (verbatim Java) + vp9/ + av1/ (Kotlin→Java). Av1DDFrame uses
+    HeaderExtension.cloneExtension() (ported rename of upstream .clone()).
+  - M7b: cc/allocation/** (BitrateController, BandwidthAllocator, SingleSourceAllocation,
+    Prioritize, VideoConstraints, AllocationSettings, Layers, ReceiverConstraintsMap,
+    PacketHandler, BandwidthAllocation) + cc/BandwidthProbing + cc/config/* + util/BooleanStateTimeTracker.
+  - KEY SEAM PRESERVED: BitrateController<T extends MediaSourceContainer> / BandwidthAllocator<T>
+    stay generic over the ported MediaSourceContainer interface — host supplies the source roster
+    (no Conference/Endpoint). Stripped (noted inline): jvbLastN/ConferenceSizeLastNLimits caps
+    (default no-limit), SsrcLimitConfig.maxVideoSsrcs→inlined 50, BridgeChannelMessage/COLIBRI
+    serialization on ReceiverVideoConstraintsMessage (plain data holder), jitsi-metaconfig configs
+    →reference.conf defaults (videobridge.cc.*). Multi-public-class Kotlin files split out
+    (MediaSourceContainer, BitrateControllerStatusSnapshot).
 - **M8** — MediaTrack public API (onRtpPacket forwarding + sendRtp injection), media
   observer callbacks, wire transceiver.setSrtpInformation at the TODO in
   SfuPeerConnection.setupDtlsTransport, route non-DTLS ICE data to transceiver, SdpUtils
