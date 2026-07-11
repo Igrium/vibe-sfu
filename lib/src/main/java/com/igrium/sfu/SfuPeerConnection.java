@@ -21,11 +21,14 @@ import org.jitsi.dcsctp4j.SendStatus;
 import org.jitsi.nlj.PacketInfo;
 import org.jitsi.nlj.Transceiver;
 import org.jitsi.nlj.TransceiverEventHandler;
+import org.jitsi.nlj.format.PayloadType;
+import org.jitsi.nlj.rtp.RtpExtension;
 import org.jitsi.nlj.srtp.TlsRole;
 import org.jitsi.nlj.util.Bandwidth;
 import org.jitsi.nlj.util.PacketInfoQueue;
 import org.jitsi.rtp.Packet;
 import org.jitsi.rtp.UnparsedPacket;
+import org.jitsi.rtp.rtp.RtpPacket;
 import org.jitsi.utils.logging.DiagnosticContext;
 import org.jitsi.utils.logging2.Logger;
 import org.jitsi.utils.logging2.LoggerImpl;
@@ -57,6 +60,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -121,6 +125,9 @@ public class SfuPeerConnection implements Closeable
     /** The media pipeline (RTP/RTCP receive + send, SRTP, BWE). Fed once DTLS supplies SRTP keys. */
     private final DiagnosticContext diagnosticContext = new DiagnosticContext();
     private final Transceiver transceiver;
+
+    /** Receive tracks keyed by SSRC, so incoming RTP can be dispatched to the right listener. */
+    private final Map<Long, MediaTrack> receiveTracks = new ConcurrentHashMap<>();
 
     /**
      * Enforces sequential processing of incoming data channel messages to maintain
@@ -354,6 +361,70 @@ public class SfuPeerConnection implements Closeable
     }
 
     /**
+     * Registers a media stream to be received from the remote peer. The host provides the
+     * SSRC, kind, and the negotiated payload types and header extensions (typically parsed
+     * from the remote SDP). Received RTP for this SSRC is delivered to the returned track's
+     * {@link MediaTrack#onRtpPacket} listener.
+     *
+     * @param kind audio or video.
+     * @param ssrc the remote SSRC to receive.
+     * @param payloadTypes the payload types negotiated for this media.
+     * @param extensions the RTP header extensions negotiated for this media.
+     * @return a receive {@link MediaTrack}.
+     */
+    public MediaTrack addReceiveTrack(
+        MediaKind kind, long ssrc, List<PayloadType> payloadTypes, List<RtpExtension> extensions)
+    {
+        for (PayloadType payloadType : payloadTypes)
+        {
+            transceiver.addPayloadType(payloadType);
+        }
+        for (RtpExtension extension : extensions)
+        {
+            transceiver.addRtpExtension(extension);
+        }
+        transceiver.addReceiveSsrc(ssrc, kind.toMediaType());
+        MediaTrack track = new MediaTrack(this, kind, ssrc, /* local = */ false);
+        receiveTracks.put(ssrc, track);
+        return track;
+    }
+
+    /**
+     * Creates a media stream to be sent to the remote peer. The host provides the local
+     * SSRC, kind, and the payload types and header extensions to use (typically mirrored
+     * into the local SDP). Use {@link MediaTrack#sendRtp} to send RTP on the returned track.
+     *
+     * @param kind audio or video.
+     * @param ssrc the local SSRC to send with.
+     * @param payloadTypes the payload types to use.
+     * @param extensions the RTP header extensions to use.
+     * @return a send {@link MediaTrack}.
+     */
+    public MediaTrack createSendTrack(
+        MediaKind kind, long ssrc, List<PayloadType> payloadTypes, List<RtpExtension> extensions)
+    {
+        for (PayloadType payloadType : payloadTypes)
+        {
+            transceiver.addPayloadType(payloadType);
+        }
+        for (RtpExtension extension : extensions)
+        {
+            transceiver.addRtpExtension(extension);
+        }
+        transceiver.setLocalSsrc(kind.toMediaType(), ssrc);
+        return new MediaTrack(this, kind, ssrc, /* local = */ true);
+    }
+
+    /**
+     * Sends an RTP packet to the remote peer (called by a send {@link MediaTrack}). The
+     * packet is cloned into a pipeline-owned buffer, so the caller keeps ownership of theirs.
+     */
+    void sendRtp(RtpPacket packet)
+    {
+        transceiver.sendPacket(new PacketInfo(packet.clone()));
+    }
+
+    /**
      * Returns a JSON-friendly snapshot of this connection's transports, for
      * diagnostics.
      */
@@ -482,13 +553,32 @@ public class SfuPeerConnection implements Closeable
 
     /**
      * Terminal handler for fully-received (SRTP-decrypted, parsed) RTP/RTCP from the peer.
-     * Phase A has no media forwarding target yet; the media public API (Phase B) dispatches
-     * these to the matching receive {@link MediaTrack} / observer by SSRC. For now the packet
-     * is dropped and its buffer returned to the pool to avoid leaking the receive hot path.
+     * Dispatches RTP to the receive {@link MediaTrack} registered for its SSRC (if any); the
+     * packet is valid only for the duration of the listener call, after which its buffer is
+     * returned to the pool. RTCP and unmatched packets are dropped.
      */
     private void handleReceivedMediaPacket(PacketInfo packetInfo)
     {
-        ByteBufferPool.returnBuffer(packetInfo.getPacket().getBuffer());
+        Packet packet = packetInfo.getPacket();
+        try
+        {
+            if (packet instanceof RtpPacket)
+            {
+                MediaTrack track = receiveTracks.get(((RtpPacket) packet).getSsrc());
+                if (track != null)
+                {
+                    track.dispatch((RtpPacket) packet);
+                }
+            }
+        }
+        catch (Throwable t)
+        {
+            logger.warn("Exception dispatching received RTP packet", t);
+        }
+        finally
+        {
+            ByteBufferPool.returnBuffer(packet.getBuffer());
+        }
     }
 
     /**
