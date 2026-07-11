@@ -15,25 +15,31 @@
  */
 package org.jitsi.nlj.rtcp;
 
+import org.jitsi.nlj.rtp.TransportCcEngine;
+import org.jitsi.nlj.util.Bandwidth;
 import org.jitsi.nlj.util.ReadOnlyStreamInformationStore;
 import org.jitsi.rtp.rtcp.RtcpPacket;
 import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.RtcpFbRembPacket;
 import org.jitsi.utils.logging2.Logger;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * TODO(port): upstream also maintains a {@code List<TransportCcEngine.BandwidthListener>} and forwards REMB bitrate
- * updates to it (via {@code addListener}/{@code bweUpdateListeners.forEach { ... }}). {@code TransportCcEngine} /
- * bandwidthestimation is not yet ported, so that listener plumbing is dropped here; only the spurious-REMB
- * detection/logging is kept.
+ * (Deviation: this class was originally ported (M4b) before {@code TransportCcEngine}/bandwidthestimation existed,
+ * so the {@code List<TransportCcEngine.BandwidthListener>} / {@code addListener} plumbing present upstream was
+ * dropped at the time. Now that {@code TransportCcEngine} is ported (M4), it is restored here to match upstream,
+ * since {@code RtpReceiverImpl} (M6) needs to subscribe to REMB-derived bandwidth updates.)
  */
 public class RembHandler implements RtcpListener
 {
     private final ReadOnlyStreamInformationStore streamInformationStore;
     private final Logger logger;
     private boolean sawSpuriousRemb = false;
+
+    private final List<TransportCcEngine.BandwidthListener> bweUpdateListeners = new CopyOnWriteArrayList<>();
 
     public RembHandler(ReadOnlyStreamInformationStore streamInformationStore, Logger parentLogger)
     {
@@ -44,6 +50,11 @@ public class RembHandler implements RtcpListener
     public ReadOnlyStreamInformationStore getStreamInformationStore()
     {
         return streamInformationStore;
+    }
+
+    public void addListener(TransportCcEngine.BandwidthListener bweUpdateListener)
+    {
+        bweUpdateListeners.add(bweUpdateListener);
     }
 
     @Override
@@ -70,8 +81,11 @@ public class RembHandler implements RtcpListener
             return;
         }
         logger.debug(() -> "Updating bandwidth to " + rembPacket.getBitrate());
-        // TODO(port): forward rembPacket.getBitrate() to registered BandwidthListeners once
-        // TransportCcEngine/bandwidthestimation is ported.
+        Bandwidth newValue = Bandwidth.ofBps(rembPacket.getBitrate());
+        for (TransportCcEngine.BandwidthListener listener : bweUpdateListeners)
+        {
+            listener.bandwidthEstimationChanged(newValue);
+        }
     }
 
     private static final AtomicInteger endpointsWithSpuriousRemb = new AtomicInteger();

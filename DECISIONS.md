@@ -305,8 +305,15 @@ Java classes holding these as defaults, with programmatic overrides where the AP
   deferred from M3). OutgoingStatisticsTracker's 3 top-level Kotlin classes →
   nested static (OutgoingStatisticsSnapshot/OutgoingSsrcStats). observable delegates →
   field + setter. ResumableStreamRewriter was already ported in M4b.
-- **M6** — Transceiver, RtpReceiver(Impl), RtpSender(Impl), stats/EndpointConnectionStats
-  + TransceiverStats (deferred from M1).
+- **M6 DONE** — Transceiver, RtpReceiver(+Impl), RtpSender(+Impl), stats/EndpointConnectionStats
+  + TransceiverStats. Multi-public-class Kotlin files split: RtpReceiverEventHandler,
+  TransceiverEventHandler, stats/RtpReceiverStats become their own top-level files.
+  recv/send queue-size configs hardcoded to upstream default 1024. RtpSenderImpl.probingDataSender
+  left non-final (javac definite-assignment vs. a probe-send lambda capturing it before assignment;
+  upstream construction order preserved). setSrtpInformation wraps checked GeneralSecurityException
+  as RuntimeException (same as SrtpTransformerNode). Also restored RembHandler's
+  BandwidthListener/addListener plumbing (an M4b TODO(port) — TransportCcEngine now exists), so
+  RtpReceiverImpl forwards REMB-derived bandwidth to its event handler. No M7/M8 seams needed.
 - **M7** — jvb cc/** (BitrateController, allocation/, vp8/vp9/av1 frame projection).
 - **M8** — MediaTrack public API (onRtpPacket forwarding + sendRtp injection), media
   observer callbacks, wire transceiver.setSrtpInformation at the TODO in
