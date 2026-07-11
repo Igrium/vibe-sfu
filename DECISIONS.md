@@ -328,10 +328,38 @@ Java classes holding these as defaults, with programmatic overrides where the AP
     serialization on ReceiverVideoConstraintsMessage (plain data holder), jitsi-metaconfig configs
     →reference.conf defaults (videobridge.cc.*). Multi-public-class Kotlin files split out
     (MediaSourceContainer, BitrateControllerStatusSnapshot).
-- **M8** — MediaTrack public API (onRtpPacket forwarding + sendRtp injection), media
-  observer callbacks, wire transceiver.setSrtpInformation at the TODO in
-  SfuPeerConnection.setupDtlsTransport, route non-DTLS ICE data to transceiver, SdpUtils
-  audio/video m-lines, testapp media demo + Playwright (fake media device) verification.
+- **M8 (ONLY remaining step)** — public media API + wiring + e2e. This is integration +
+  runtime-debug work (NOT bulk translation); drive it in the orchestrator, verify with the
+  running testapp + Playwright. Concrete plan / facts gathered (2026-07-11):
+  1. **Create a Transceiver in SfuPeerConnection.** Ctor:
+     `Transceiver(String id, ExecutorService recvExec, ExecutorService sendExec,
+     ScheduledExecutorService bgExec, DiagnosticContext, Logger, TransceiverEventHandler,
+     Clock)` (+ overload w/ `Function<Long,String> getMidBySsrc`). Executors: reuse
+     TaskPools (CPU_POOL/IO_POOL/SCHEDULED_POOL — check util/TaskPools for the scheduled one).
+     DiagnosticContext: `new DiagnosticContext()` (jitsi-utils). TransceiverEventHandler: new
+     library impl bridging to SfuPeerConnectionObserver media callbacks.
+  2. **SRTP wiring** — at SfuPeerConnection.java:424 TODO in setupDtlsTransport's DTLS event
+     handler, call `transceiver.setSrtpInformation(chosenSrtpProtectionProfile, tlsRole,
+     keyingMaterial, /*cryptex=*/false)` (exact 4-arg signature confirmed at Transceiver.java:377;
+     it builds SrtpTransformers via SrtpUtil internally). Do it before sctpTransport.connect().
+  3. **Inbound media** — at SfuPeerConnection.java:380 (currently drops non-DTLS), replace the
+     drop with `transceiver.handleIncomingPacket(new PacketInfo(new UnparsedPacket(buf,off,len)))`
+     (parse happens in the receiver pipeline). Guard on transceiver!=null / SRTP set.
+  4. **Outbound media** — `transceiver.setOutgoingPacketHandler(pktInfo -> iceTransport.send(...))`
+     (packets are already SRTP-encrypted by the sender pipeline's SrtpTransformerNode). And
+     `transceiver.setIncomingPacketHandler(...)` to receive decrypted RTP for forwarding.
+  5. **Public MediaTrack API** (com.igrium.sfu): a MediaTrack handle exposing onRtpPacket
+     forwarding + sendRtp injection; media observer callbacks on SfuPeerConnectionObserver
+     (onTrack/onRtp...). Register payload types + header extensions on the transceiver
+     (transceiver.addPayloadType / addRtpExtension / addReceiveSsrc / setMediaSources) from the
+     host-supplied SDP/track config.
+  6. **SdpUtils** — add audio/video m-line helpers (com.igrium.sfu.sdp), loosely coupled per the
+     standing "don't over-integrate SDP" guidance.
+  7. **testapp** media demo + Playwright fake-media (`--use-fake-device-for-media-stream`)
+     verification that RTP actually forwards loopback. Watch the Agents.md runtime gotchas
+     (.local/prflx candidates, DTLS role/setup parity, DCEP deadlock, USE_PUSH_API).
+  M1 leftover: RtpLayerDesc/PacketStreamStats TODO(port) markers can now call
+  BitrateCalculator.createBitrateTracker (M4b) — wire opportunistically.
 Workflow: dispatch one sonnet agent per step with facts inlined (see Agents.md "Don't
 re-verify verified work"); orchestrator verifies compile, commits, pushes.
 Build with system gradle (`/opt/gradle/bin/gradle`, not `./gradlew`). Config = plain Java, defaults §5b.
