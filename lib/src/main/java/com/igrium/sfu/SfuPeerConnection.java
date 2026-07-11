@@ -19,9 +19,14 @@ import org.jitsi.dcsctp4j.ErrorKind;
 import org.jitsi.dcsctp4j.SendPacketStatus;
 import org.jitsi.dcsctp4j.SendStatus;
 import org.jitsi.nlj.PacketInfo;
+import org.jitsi.nlj.Transceiver;
+import org.jitsi.nlj.TransceiverEventHandler;
 import org.jitsi.nlj.srtp.TlsRole;
+import org.jitsi.nlj.util.Bandwidth;
 import org.jitsi.nlj.util.PacketInfoQueue;
+import org.jitsi.rtp.Packet;
 import org.jitsi.rtp.UnparsedPacket;
+import org.jitsi.utils.logging.DiagnosticContext;
 import org.jitsi.utils.logging2.Logger;
 import org.jitsi.utils.logging2.LoggerImpl;
 import org.jitsi.videobridge.TransportConfig;
@@ -44,6 +49,7 @@ import org.jitsi.videobridge.util.TaskPools;
 
 import java.io.Closeable;
 import java.nio.ByteBuffer;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -111,6 +117,10 @@ public class SfuPeerConnection implements Closeable
     private final DcSctpHandler sctpHandler = new DcSctpHandler();
     private final DcSctpTransport sctpTransport;
     private final DataChannelStack dataChannelStack;
+
+    /** The media pipeline (RTP/RTCP receive + send, SRTP, BWE). Fed once DTLS supplies SRTP keys. */
+    private final DiagnosticContext diagnosticContext = new DiagnosticContext();
+    private final Transceiver transceiver;
 
     /**
      * Enforces sequential processing of incoming data channel messages to maintain
@@ -186,6 +196,30 @@ public class SfuPeerConnection implements Closeable
             TaskPools.IO_POOL,
             this::processDataChannelPacket,
             TransportConfig.getQueueSize());
+
+        transceiver = new Transceiver(
+            id,
+            TaskPools.CPU_POOL,
+            TaskPools.CPU_POOL,
+            TaskPools.SCHEDULED_POOL,
+            diagnosticContext,
+            logger,
+            new TransceiverEventHandler()
+            {
+                @Override
+                public void bandwidthEstimationChanged(Bandwidth newValue)
+                {
+                    logger.debug(() -> "Bandwidth estimation changed to " + newValue);
+                }
+            },
+            Clock.systemUTC());
+        // Fully-processed (SRTP-encrypted) outgoing packets go out over ICE.
+        transceiver.setOutgoingPacketHandler(packetInfo -> {
+            Packet packet = packetInfo.getPacket();
+            iceTransport.send(packet.getBuffer(), packet.getOffset(), packet.getLength());
+        });
+        // Fully-received (decrypted, parsed) RTP/RTCP is handed to the media layer.
+        transceiver.setIncomingPacketHandler(this::handleReceivedMediaPacket);
 
         setupIceTransport();
         setupDtlsTransport();
@@ -349,6 +383,8 @@ public class SfuPeerConnection implements Closeable
         logger.info("Closing");
         try
         {
+            transceiver.stop();
+            transceiver.teardown();
             sctpTransport.stop();
             dtlsTransport.stop();
             iceTransport.stop();
@@ -377,9 +413,10 @@ public class SfuPeerConnection implements Closeable
             }
             else
             {
-                // No media pipeline in this slice: drop non-DTLS (SRTP) traffic.
-                logger.debug(() -> "Dropping non-DTLS packet (media pipeline not attached)");
-                ByteBufferPool.returnBuffer(buffer.getBuffer());
+                // SRTP/media: hand to the transceiver's receive pipeline (it decrypts, parses,
+                // and recycles the buffer, mirroring upstream Endpoint's media handling).
+                transceiver.handleIncomingPacket(new PacketInfo(
+                    new UnparsedPacket(buffer.getBuffer(), buffer.getOffset(), buffer.getLength())));
             }
         };
         iceTransport.eventHandler = new IceTransport.EventHandler()
@@ -421,8 +458,9 @@ public class SfuPeerConnection implements Closeable
         dtlsTransport.eventHandler = (chosenSrtpProtectionProfile, tlsRole, keyingMaterial) -> {
             logger.info("DTLS handshake complete");
             this.tlsRole = tlsRole;
-            // TODO(media pipeline): pass chosenSrtpProtectionProfile/keyingMaterial to the
-            // transceiver (transceiver.setSrtpInformation) once media support lands.
+            // Hand the negotiated SRTP profile + keying material to the media pipeline so the
+            // receiver/sender can decrypt/encrypt. (cryptex is not negotiated in this slice.)
+            transceiver.setSrtpInformation(chosenSrtpProtectionProfile, tlsRole, keyingMaterial, false);
             if (tlsRole == TlsRole.CLIENT)
             {
                 // The DTLS client initiates the SCTP association (mirrors upstream Relay;
@@ -440,6 +478,17 @@ public class SfuPeerConnection implements Closeable
     private void dtlsAppPacketReceived(byte[] data, int off, int len)
     {
         sctpHandler.processPacket(new PacketInfo(new UnparsedPacket(data, off, len)));
+    }
+
+    /**
+     * Terminal handler for fully-received (SRTP-decrypted, parsed) RTP/RTCP from the peer.
+     * Phase A has no media forwarding target yet; the media public API (Phase B) dispatches
+     * these to the matching receive {@link MediaTrack} / observer by SSRC. For now the packet
+     * is dropped and its buffer returned to the pool to avoid leaking the receive hot path.
+     */
+    private void handleReceivedMediaPacket(PacketInfo packetInfo)
+    {
+        ByteBufferPool.returnBuffer(packetInfo.getPacket().getBuffer());
     }
 
     /**
