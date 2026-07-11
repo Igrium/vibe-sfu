@@ -379,3 +379,105 @@ Use sonnet background agents for bulk translation; one focused agent per layer; 
 7. jvb transport (ice/dtls/sctp) + data channels → 8. cc/bitrate → 9. `com.igrium.sfu` public API →
 10. `testapp` demo + client → 11. Playwright verification → 12. README/Javadoc/Agents.md.
 ```
+
+## 8. M8 comprehensive implementation plan (media path + public API + e2e)
+
+**Status:** M1–M7 done — the whole jitsi-videobridge media pipeline is ported and `:lib:compileJava`
+is green. M8 exposes that pipeline as a programmatic media API on `SfuPeerConnection`, wires the
+transceiver into the existing ICE/DTLS transport, and proves media forwards end-to-end.
+
+### 8.0 Design model (what the library owns vs. what the host owns)
+- The library models **one** peer connection (`SfuPeerConnection`). It does NOT do conference
+  bookkeeping. The "selective forwarding" is the **host's** job: it owns N `SfuPeerConnection`s and
+  copies RTP from one to the others (exactly like `DemoSfu` already relays data-channel messages).
+- Therefore the library's media responsibilities are only: (a) hand the host fully-received RTP/RTCP
+  from a peer, (b) accept RTP from the host and send it (SRTP-encrypted) to a peer, (c) let the host
+  describe SSRCs / payload types / header extensions so the pipeline and SDP line up.
+- Keep it webrtc-java-flavored and minimal; mirror the existing `DataChannelTrack` pattern.
+
+### 8.1 Media data flow through the ported pipeline (reference)
+- **Inbound:** ICE `incomingDataHandler` → bytes that are NOT DTLS are SRTP → wrap as
+  `PacketInfo(new UnparsedPacket(buf,off,len))` → `transceiver.handleIncomingPacket(pi)` →
+  `RtpReceiverImpl` pipeline (SRTP-decrypt → parse → stats/… ) → the handler registered via
+  `transceiver.setIncomingPacketHandler(PacketHandler)` receives a parsed `RtpPacket`/`RtcpPacket`.
+  Library dispatches that to the receive `MediaTrack` / observer.
+- **Outbound:** host → `MediaTrack.sendRtp(...)` → `transceiver.sendPacket(PacketInfo)` →
+  `RtpSenderImpl` pipeline ( … → SRTP-encrypt) → handler registered via
+  `transceiver.setOutgoingPacketHandler(PacketHandler)` → `iceTransport.send(...)`.
+- **Config surface on Transceiver:** `addPayloadType(PayloadType)`, `addRtpExtension(RtpExtension)`,
+  `addReceiveSsrc(long, MediaType)`, `setLocalSsrc(MediaType, long)`, `setMediaSources(MediaSourceDesc[])`
+  (simulcast/quality; a basic single-stream loopback can pass a minimal descriptor),
+  `setSrtpInformation(profile, TlsRole, keyingMaterial, cryptex)`.
+
+### 8.2 Phase A — Transceiver plumbing in `SfuPeerConnection` (compiles; no behavior change yet)
+Files: `lib/.../com/igrium/sfu/SfuPeerConnection.java`.
+1. Add `private volatile Transceiver transceiver;` and create it lazily once SRTP is known (or in the
+   ctor — decide during impl; lazy-on-DTLS-complete avoids an idle transceiver). Ctor args:
+   `new Transceiver(id, TaskPools.CPU_POOL, TaskPools.CPU_POOL, TaskPools.SCHEDULED_POOL,
+   new DiagnosticContext(), logger, eventHandler, Clock.systemUTC())`. (Receiver & sender executors
+   can share CPU_POOL as upstream does for the bridge; revisit if starvation shows up.)
+2. `TransceiverEventHandler` impl (interface only needs `audioLevelReceived(ssrc,level)` and
+   `bandwidthEstimationChanged(Bandwidth)` — both `default`). Provide a small private class; forward
+   BWE to a new observer hook if useful, ignore audio level initially.
+3. **SRTP:** at the DTLS `eventHandler` (SfuPeerConnection.java:~424 TODO) call
+   `transceiver.setSrtpInformation(chosenSrtpProtectionProfile, tlsRole, keyingMaterial, false)`
+   BEFORE `sctpTransport.connect()`. Cryptex=false (not negotiated in this slice).
+4. **Inbound routing:** at the ICE `incomingDataHandler` non-DTLS branch (SfuPeerConnection.java:~380,
+   currently drops) → if `transceiver != null` forward as PacketInfo(UnparsedPacket); else drop.
+   Keep returning/reusing buffers per the existing ByteBufferPool discipline (the pipeline copies).
+5. `transceiver.setOutgoingPacketHandler(pi -> iceTransport.send(pi.getPacket()... ))` — send the
+   already-encrypted bytes; `transceiver.setIncomingPacketHandler(pi -> onReceivedRtp(pi))`.
+6. `close()` must `transceiver.stop()`/`teardown()`.
+Verification for Phase A: `:lib:compileJava` green; existing data-channel Playwright path still works
+(media not yet exercised).
+
+### 8.3 Phase B — public media API (`com.igrium.sfu`)
+New/edited files: `MediaTrack.java`, `MediaStreamType`/`MediaKind` enum (audio|video), edits to
+`SfuPeerConnectionObserver.java` and `SfuPeerConnection.java`.
+- `MediaTrack` (mirror `DataChannelTrack`): fields ssrc, kind, and either a receive-listener
+  (`onRtpPacket(Consumer<RtpPacket>)`) or a `sendRtp(RtpPacket)` for a local track. Keep the raw
+  `org.jitsi.rtp.rtp.RtpPacket` as the currency (host forwards bytes; no transcoding).
+- `SfuPeerConnection`:
+  - `MediaTrack addReceiveTrack(MediaKind, long ssrc, List<PayloadType>, List<RtpExtension>)` —
+    registers payload types/extensions/receive-ssrc on the transceiver, returns a receive track.
+  - `MediaTrack createSendTrack(MediaKind, long ssrc, List<PayloadType>, List<RtpExtension>)` —
+    sets local ssrc, returns a track whose `sendRtp` calls `transceiver.sendPacket`.
+  - route `onReceivedRtp(PacketInfo)` → the matching receive track's listener (by ssrc), else observer.
+- `SfuPeerConnectionObserver`: add `default void onRtpPacketReceived(MediaTrack, RtpPacket)` (or drive
+  purely through `MediaTrack.onRtpPacket` — pick one; prefer the track listener, keep observer thin).
+- Payload-type construction uses the already-ported `org.jitsi.nlj.format.*` (Vp8/Vp9/Av1/H264/Opus/…)
+  + `RtpExtension`/`RtpExtensionType`.
+
+### 8.4 Phase C — SDP helpers (`com.igrium.sfu.sdp.SdpUtils`)
+- Extend the existing `SdpUtils` (data-channel/transport only today) with **audio/video m-line**
+  generation + parsing, staying LOOSELY coupled (standing rule: "if videobridge didn't have it,
+  don't over-integrate"). Parse the browser offer's `m=audio`/`m=video`: payload types (rtpmap/fmtp),
+  `a=extmap`, `a=ssrc`, direction, and the transport bits already handled. Emit a matching answer
+  m-line advertising the SFU's chosen PT/extensions and (for send) our SSRC.
+- This is glue for the testapp; it does not need to be a full SDP stack.
+
+### 8.5 Phase D — testapp media demo
+Files: `testapp/.../DemoSfu.java`, `testapp/.../web/index.html`.
+- `index.html`: `getUserMedia({audio,video})`, `pc.addTrack(...)`, render remote `pc.ontrack` in a
+  `<video>`; still POST offer → `/offer`, apply answer. Keep the data-channel path too.
+- `DemoSfu`: on offer, use `SdpUtils` to configure the `SfuPeerConnection` receive tracks; **forward**
+  each peer's received RTP to the other connected peers (media analog of the existing
+  `relayString`/`relayBinary`) via their send tracks — the smallest real SFU loop.
+- Loopback option for a single browser (forward a peer's media back to itself) to make the e2e
+  assertion trivial and deterministic.
+
+### 8.6 Phase E — Playwright fake-media e2e verification
+- New `scratchpad/e2e-media.js` (Playwright): launch Chromium with
+  `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream`, load the testapp, start the
+  connection, and assert media actually flows: check `RTCPeerConnection.getStats()` for
+  `inbound-rtp.bytesReceived > 0` / `packetsReceived > 0` on the browser's receiving side, and/or a
+  server-side counter of forwarded RTP packets exposed on `/debug`. Chromium is preinstalled
+  (`/opt/pw-browsers/chromium`, `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`) — do NOT run `playwright install`.
+- Watch the known runtime gotchas (see Agents.md): `.local`/prflx ICE candidates, DTLS role/setup
+  parity, USE_PUSH_API static block, and buffer-pool discipline on the media hot path.
+
+### 8.7 Order & checkpoints
+A → B → C compile-checkpointed and committed together (or A alone first if it's large); D+E form the
+verification commit. Commit + push after each green checkpoint. When A–E pass e2e, mark task #13 done,
+update this file's §5c (M8 DONE) and the README API docs, and note any new runtime lessons in Agents.md.
+
