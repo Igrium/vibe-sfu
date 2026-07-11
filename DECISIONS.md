@@ -283,11 +283,24 @@ Java classes holding these as defaults, with programmatic overrides where the AP
   RetransmissionRequester, RtcpEventNotifier, Compound/SingleRtcpParser) + common nodes
   (RtpParser, PacketParser, PacketCacher, PacketLossNode, PacketStreamStatsNode,
   SrtpTransformerNode+subnodes, AudioRedHandler, Pcap writers; pcap4j dep added).
-- **M4 NEXT** — transform/node/incoming/** + rtp/bandwidthestimation(2)/** (29 files) +
-  TransportCcEngine/ClassicTransportCcEngine/LossListener + **rtcp/RtcpRrGenerator**
-  (deferred from M3, needs IncomingStatisticsTracker).
-- **M5** — transform/node/outgoing/** + ResumableStreamRewriter + **rtcp/RtcpSrUpdater**
-  (deferred from M3, needs OutgoingStatisticsTracker).
+- **M4 DONE** — split into M4a (`52cc011`) + M4b (this commit).
+  - M4a: rtp/TransportCcEngine/ClassicTransportCcEngine/LossListener/LossTracker,
+    rtp/bandwidthestimation/** (GoogleCc v1), rtp/bandwidthestimation2/** (line-by-line
+    libwebrtc GoogCc v2 — ~52 files: delay-based BWE (Trendline/InterArrival), loss-based
+    (LossBasedBweV2), SendSideBandwidthEstimation, probe controllers, GoogCcNetworkController
+    + GoogCcTransportCcEngine integration), plus verbatim org.jitsi_modified remote bitrate
+    estimators. NetworkTypes.kt fanned out to many small value classes. `by config` GoogleCc2
+    defaults shipped inline (window=1s/bucket=20ms/ignore=0s).
+  - M4b: transform/node/incoming/** (16 files incl. VideoBitrateCalculator bundled with
+    BitrateCalculator) + **rtcp/RtcpRrGenerator** (was deferred from M3). Multi-public-class
+    Kotlin files → nested static classes (IncomingStatisticsSnapshot/IncomingSsrcStats under
+    IncomingStatisticsTracker). observableWhenChanged delegates → field + setEnabled(boolean).
+  - Also ported early (needed by DiscardableDiscarder): **rtp/ResumableStreamRewriter**
+    (originally slated for M5) — faithful, incl. StreamRewriteHistory on the ported ArrayCache.
+  - M1 TODO(port) markers in RtpLayerDesc/PacketStreamStats (BitrateCalculator.createBitrateTracker
+    sizing) still stand — BitrateCalculator now exists; wire when convenient.
+- **M5** — transform/node/outgoing/** + **rtcp/RtcpSrUpdater** (deferred from M3, needs
+  OutgoingStatisticsTracker). ResumableStreamRewriter already ported in M4b.
 - **M6** — Transceiver, RtpReceiver(Impl), RtpSender(Impl), stats/EndpointConnectionStats
   + TransceiverStats (deferred from M1).
 - **M7** — jvb cc/** (BitrateController, allocation/, vp8/vp9/av1 frame projection).
