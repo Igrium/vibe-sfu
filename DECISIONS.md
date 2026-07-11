@@ -299,8 +299,12 @@ Java classes holding these as defaults, with programmatic overrides where the AP
     (originally slated for M5) — faithful, incl. StreamRewriteHistory on the ported ArrayCache.
   - M1 TODO(port) markers in RtpLayerDesc/PacketStreamStats (BitrateCalculator.createBitrateTracker
     sizing) still stand — BitrateCalculator now exists; wire when convenient.
-- **M5** — transform/node/outgoing/** + **rtcp/RtcpSrUpdater** (deferred from M3, needs
-  OutgoingStatisticsTracker). ResumableStreamRewriter already ported in M4b.
+- **M5 DONE** — transform/node/outgoing/** (9 files: AbsSendTime, HeaderExtEncoder,
+  HeaderExtStripper, MidStamper, OutgoingStatisticsTracker, ProbingDataSender,
+  RetransmissionSender, SentRtcpStats, TccSeqNumTagger) + **rtcp/RtcpSrUpdater** (was
+  deferred from M3). OutgoingStatisticsTracker's 3 top-level Kotlin classes →
+  nested static (OutgoingStatisticsSnapshot/OutgoingSsrcStats). observable delegates →
+  field + setter. ResumableStreamRewriter was already ported in M4b.
 - **M6** — Transceiver, RtpReceiver(Impl), RtpSender(Impl), stats/EndpointConnectionStats
   + TransceiverStats (deferred from M1).
 - **M7** — jvb cc/** (BitrateController, allocation/, vp8/vp9/av1 frame projection).
