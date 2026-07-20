@@ -4,33 +4,101 @@
 <meta charset="utf-8">
 <title>jitsi-sfu demo client</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; }
-  #log { border: 1px solid #ccc; padding: 0.5rem; min-height: 8rem; white-space: pre-line; }
-  .ok { color: #070; }
-  .err { color: #a00; }
-  video { width: 240px; height: 180px; background: #222; margin-right: 1rem; }
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 900px; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 .6rem; }
+  .status { display: flex; flex-wrap: wrap; gap: .5rem 1.2rem; margin-bottom: 1rem; }
+  .status b { font-variant-numeric: tabular-nums; }
+  .panel { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+
+  /* Chat */
+  #chat { border: 1px solid #8884; border-radius: 6px; height: 12rem; overflow-y: auto;
+          padding: .5rem; background: #8881; margin-bottom: .5rem; }
+  .msg { margin: .15rem 0; }
+  .msg .who { font-weight: 600; }
+  .msg.me .who { color: #2a7; }
+  .msg.sys { color: #888; font-style: italic; }
+  #chatText { flex: 1 1 12rem; padding: .4rem; }
+  button { padding: .4rem .8rem; cursor: pointer; }
+
+  /* Audio meters */
+  .meter { display: flex; align-items: center; gap: .5rem; margin: .35rem 0; }
+  .meter label { width: 9rem; }
+  .meter canvas { width: 260px; height: 16px; background: #8882; border-radius: 3px; }
+
+  video { width: 240px; height: 180px; background: #222; border-radius: 6px; }
+  .videos { display: flex; gap: 1rem; flex-wrap: wrap; }
+  figure { margin: 0; }
+  figcaption { font-size: .8rem; color: #888; }
+  #log { border: 1px solid #8884; border-radius: 6px; padding: .5rem; min-height: 5rem;
+         max-height: 12rem; overflow-y: auto; white-space: pre-line; font-size: .85rem; }
+  .ok { color: #2a7; }
+  .err { color: #d55; }
+  .hint { color: #888; font-size: .85rem; }
 </style>
 </head>
 <body>
 <h1>jitsi-sfu demo client</h1>
-<p>Peer name: <b id="name"></b> &mdash; ICE: <b id="ice">new</b> &mdash; data channel: <b id="dc">closed</b></p>
-<div>
-  <video id="localVideo" autoplay playsinline muted></video>
-  <video id="remoteVideo" autoplay playsinline muted></video>
+<div class="status">
+  <span>Peer: <b id="name"></b></span>
+  <span>ICE: <b id="ice">new</b></span>
+  <span>Data channel: <b id="dc">closed</b></span>
 </div>
+
+<!-- ─────────────────────────────  DATA CHANNEL: CHAT ROOM  ───────────────────────────── -->
+<div class="panel">
+  <h2>Chat room &mdash; data channel test</h2>
+  <p class="hint">Messages are sent over the WebRTC data channel to the SFU, which relays them to
+     every <em>other</em> connected peer. Open this page in a second tab (or another browser) to
+     see forwarding in action.</p>
+  <div id="chat" aria-live="polite"></div>
+  <div class="row">
+    <input id="chatText" placeholder="Type a message and press Enter…" autocomplete="off" disabled>
+    <button id="chatSend" disabled>Send</button>
+  </div>
+</div>
+
+<!-- ─────────────────────────────  AUDIO TEST  ───────────────────────────── -->
+<div class="panel">
+  <h2>Audio &mdash; loopback test</h2>
+  <p class="hint">Your microphone is sent to the SFU and looped straight back as raw RTP (no
+     transcoding). The meters below show live audio levels; enable playback to actually hear the
+     round-trip (headphones recommended to avoid feedback).</p>
+  <div class="row" style="margin-bottom:.5rem">
+    <button id="audioEnable">Enable audio meters</button>
+    <label><input type="checkbox" id="playback"> Play looped-back audio (may echo)</label>
+    <label><input type="checkbox" id="micMute"> Mute my mic</label>
+  </div>
+  <div class="meter"><label>My mic (outgoing)</label><canvas id="localMeter" width="260" height="16"></canvas></div>
+  <div class="meter"><label>Loopback (incoming)</label><canvas id="remoteMeter" width="260" height="16"></canvas></div>
+  <audio id="remoteAudio" autoplay></audio>
+</div>
+
+<!-- ─────────────────────────────  VIDEO  ───────────────────────────── -->
+<div class="panel">
+  <h2>Video &mdash; loopback</h2>
+  <div class="videos">
+    <figure><video id="localVideo" autoplay playsinline muted></video><figcaption>local</figcaption></figure>
+    <figure><video id="remoteVideo" autoplay playsinline muted></video><figcaption>looped back from SFU</figcaption></figure>
+  </div>
+</div>
+
+<h2>Log</h2>
 <div id="log"></div>
+
 <script>
 "use strict";
 
-// State inspected by the Playwright end-to-end test.
+// ───────────────────────── State inspected by the Playwright test harness ─────────────────────────
 window.testState = {
     name: new URLSearchParams(location.search).get("name") || ("peer" + Math.floor(Math.random() * 1000)),
     ice: "new",
     dcOpen: false,
-    messages: [],
+    messages: [],       // raw payloads received on the data channel
     errors: [],
-    // Kinds of remote tracks seen via pc.ontrack (e.g. ["audio", "video"]).
-    remoteTracks: []
+    remoteTracks: []    // kinds of remote tracks seen via pc.ontrack
 };
 
 const logDiv = document.getElementById("log");
@@ -39,13 +107,14 @@ function log(cls, text) {
     line.className = cls;
     line.textContent = text;
     logDiv.appendChild(line);
+    logDiv.scrollTop = logDiv.scrollHeight;
 }
 
-document.getElementById("name").textContent = testState.name;
+const myName = testState.name;
+document.getElementById("name").textContent = myName;
 
 const pc = new RTCPeerConnection();
-// Exposed for the Playwright test harness (page.evaluate reads window.pc.getStats()).
-window.pc = pc;
+window.pc = pc;                      // exposed for the Playwright harness (getStats)
 const dc = pc.createDataChannel("chat");
 
 pc.oniceconnectionstatechange = () => {
@@ -54,64 +123,171 @@ pc.oniceconnectionstatechange = () => {
     log("", "ICE state: " + pc.iceConnectionState);
 };
 
-pc.ontrack = (event) => {
-    log("ok", "ontrack: " + event.track.kind);
-    testState.remoteTracks.push(event.track.kind);
-    let stream = event.streams[0];
-    if (!stream) {
-        // No a=msid in the answer (this demo's SdpUtils doesn't emit one) - synthesize one so
-        // the <video> element still has something to render.
-        stream = new MediaStream([event.track]);
+// ───────────────────────── Chat room (data channel) ─────────────────────────
+const chatDiv = document.getElementById("chat");
+const chatText = document.getElementById("chatText");
+const chatSend = document.getElementById("chatSend");
+
+function addChat(who, text, cls) {
+    const line = document.createElement("div");
+    line.className = "msg " + (cls || "");
+    if (who !== null) {
+        const w = document.createElement("span");
+        w.className = "who";
+        w.textContent = who + ": ";
+        line.appendChild(w);
     }
-    if (event.track.kind === "video") {
-        document.getElementById("remoteVideo").srcObject = stream;
-    }
-};
+    line.appendChild(document.createTextNode(text));
+    chatDiv.appendChild(line);
+    chatDiv.scrollTop = chatDiv.scrollHeight;
+}
+
+function sendChat() {
+    const text = chatText.value.trim();
+    if (!text || dc.readyState !== "open") return;
+    dc.send(JSON.stringify({ type: "chat", name: myName, text }));
+    addChat(myName + " (you)", text, "me");   // relay only reaches OTHER peers, so echo locally
+    chatText.value = "";
+}
+chatSend.onclick = sendChat;
+chatText.addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+
+// Kept for the Playwright harness: sends a raw string over the channel.
+window.sendMessage = (text) => dc.send(text);
 
 dc.onopen = () => {
     testState.dcOpen = true;
     document.getElementById("dc").textContent = "open";
+    chatText.disabled = false;
+    chatSend.disabled = false;
     log("ok", "data channel open");
+    addChat(null, "Connected to the SFU. Open another tab to chat.", "sys");
 };
 dc.onclose = () => {
     testState.dcOpen = false;
     document.getElementById("dc").textContent = "closed";
+    chatText.disabled = true;
+    chatSend.disabled = true;
 };
 dc.onmessage = (e) => {
-    testState.messages.push(e.data);
+    testState.messages.push(e.data);      // harness compatibility (raw payload)
     log("ok", "received: " + e.data);
+    let who = "peer", text = e.data;
+    try {
+        const obj = JSON.parse(e.data);
+        if (obj && obj.type === "chat") { who = obj.name || "peer"; text = obj.text; }
+    } catch (_) { /* not JSON: show raw */ }
+    addChat(who, text);
 };
 dc.onerror = (e) => {
     testState.errors.push(String(e.error || e));
     log("err", "data channel error: " + (e.error || e));
 };
 
-// Used by the test to send a message through the SFU.
-window.sendMessage = (text) => dc.send(text);
+// ───────────────────────── Audio metering (Web Audio) ─────────────────────────
+let audioCtx = null;
+const remoteAudio = document.getElementById("remoteAudio");
+remoteAudio.muted = true;   // default muted to avoid speaker→mic feedback; meter still works
 
+function ensureAudioCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    return audioCtx;
+}
+
+// Attaches an RMS level meter to a MediaStream, drawing into a canvas. Metering a remote WebRTC
+// stream works even while it's muted, so the loopback can be verified without playing it aloud.
+function attachMeter(stream, canvas) {
+    const ac = ensureAudioCtx();
+    const source = ac.createMediaStreamSource(stream);
+    const analyser = ac.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    const buf = new Uint8Array(analyser.fftSize);
+    const ctx = canvas.getContext("2d");
+    (function draw() {
+        analyser.getByteTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+        const rms = Math.sqrt(sum / buf.length);
+        const level = Math.min(1, rms * 3);   // scale up; speech RMS is small
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = level > 0.7 ? "#d55" : "#2a7";
+        ctx.fillRect(0, 0, canvas.width * level, canvas.height);
+        requestAnimationFrame(draw);
+    })();
+}
+
+let localStream = null;
+let remoteStream = null;
+let localMeterAttached = false, remoteMeterAttached = false;
+
+document.getElementById("audioEnable").onclick = () => {
+    ensureAudioCtx();
+    if (localStream && !localMeterAttached) {
+        attachMeter(localStream, document.getElementById("localMeter"));
+        localMeterAttached = true;
+    }
+    if (remoteStream && !remoteMeterAttached) {
+        attachMeter(remoteStream, document.getElementById("remoteMeter"));
+        remoteMeterAttached = true;
+    }
+    log("ok", "audio meters enabled");
+};
+
+document.getElementById("playback").onchange = (e) => {
+    remoteAudio.muted = !e.target.checked;
+    if (e.target.checked) ensureAudioCtx();
+};
+document.getElementById("micMute").onchange = (e) => {
+    if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = !e.target.checked);
+};
+
+pc.ontrack = (event) => {
+    log("ok", "ontrack: " + event.track.kind);
+    testState.remoteTracks.push(event.track.kind);
+    let stream = event.streams[0];
+    if (!stream) stream = new MediaStream([event.track]);   // demo answer has no a=msid
+    if (event.track.kind === "video") {
+        document.getElementById("remoteVideo").srcObject = stream;
+    } else if (event.track.kind === "audio") {
+        remoteStream = new MediaStream([event.track]);
+        remoteAudio.srcObject = remoteStream;               // also needed for Web Audio to pull frames
+        if (audioCtx && !remoteMeterAttached) {
+            attachMeter(remoteStream, document.getElementById("remoteMeter"));
+            remoteMeterAttached = true;
+        }
+    }
+};
+
+// ───────────────────────── Offer / answer ─────────────────────────
 function waitForGathering(pc) {
     if (pc.iceGatheringState === "complete") return Promise.resolve();
     return new Promise((resolve) => {
         pc.addEventListener("icegatheringstatechange", () => {
             if (pc.iceGatheringState === "complete") resolve();
         });
-        // Don't wait forever; host candidates are enough for a local test.
-        setTimeout(resolve, 2000);
+        setTimeout(resolve, 2000);   // host candidates are enough for a local test
     });
 }
 
 (async () => {
     try {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-            document.getElementById("localVideo").srcObject = stream;
-            for (const track of stream.getTracks()) {
-                pc.addTrack(track, stream);
+            // Prefer audio+video; fall back to audio-only so the audio test still works on a
+            // machine with no camera.
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+            } catch (_) {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             }
+            localStream = stream;
+            document.getElementById("localVideo").srcObject = stream;
+            for (const track of stream.getTracks()) pc.addTrack(track, stream);
             log("ok", "getUserMedia: " + stream.getTracks().map(t => t.kind).join(", "));
         } catch (mediaErr) {
-            // Media is best-effort for browsers without fake devices; the data channel path
-            // still works without it.
+            // Media is best-effort; the data-channel chat still works without it.
             log("err", "getUserMedia failed: " + mediaErr);
         }
 
