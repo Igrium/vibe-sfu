@@ -502,7 +502,9 @@ public final class SdpUtils
         IceCandidate candidate = new IceCandidate();
         candidate.foundation = tokens[0];
         candidate.component = Integer.parseInt(tokens[1]);
-        candidate.protocol = tokens[2];
+        // RFC 5245 spells the transport "UDP"/"TCP" (uppercase) and browsers emit it that
+        // way, but ice4j's Transport.parse only recognises the lowercase token, so normalise.
+        candidate.protocol = tokens[2].toLowerCase(java.util.Locale.ROOT);
         candidate.priority = Long.parseLong(tokens[3]);
         candidate.ip = tokens[4];
         candidate.port = Integer.parseInt(tokens[5]);
