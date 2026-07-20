@@ -32,6 +32,9 @@ import org.jitsi.nlj.util.Bandwidth;
 import org.jitsi.nlj.util.PacketInfoQueue;
 import org.jitsi.rtp.Packet;
 import org.jitsi.rtp.UnparsedPacket;
+import org.jitsi.rtp.rtcp.rtcpfb.RtcpFbPacket;
+import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.RtcpFbFirPacket;
+import org.jitsi.rtp.rtcp.rtcpfb.payload_specific_fb.RtcpFbPliPacket;
 import org.jitsi.rtp.rtp.RtpPacket;
 import org.jitsi.utils.logging.DiagnosticContext;
 import org.jitsi.utils.logging2.Logger;
@@ -67,6 +70,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongConsumer;
 
 /**
  * A single WebRTC peer connection: ICE + DTLS + SCTP transport with WebRTC data
@@ -166,6 +170,15 @@ public class SfuPeerConnection implements Closeable
     private TransportDescription remoteDescription;
 
     /**
+     * Invoked when the remote peer requests a keyframe (RTCP PLI/FIR) for one of the SSRCs we are
+     * sending; the argument is that SSRC. A forwarding host should translate this into a
+     * {@link #requestKeyFrame} on the upstream source SSRC, so the original encoder emits a fresh
+     * keyframe. Without this, a receiver that misses the initial keyframe (e.g. Chrome after a
+     * lost packet) can stay stuck on a black frame indefinitely.
+     */
+    private volatile LongConsumer keyFrameRequestHandler;
+
+    /**
      * Creates a peer connection with a random id and a default logger.
      */
     public SfuPeerConnection(Role role, SfuPeerConnectionObserver observer)
@@ -234,10 +247,17 @@ public class SfuPeerConnection implements Closeable
                 }
             },
             Clock.systemUTC());
-        // Fully-processed (SRTP-encrypted) outgoing packets go out over ICE.
+        // Fully-processed (SRTP-encrypted) outgoing packets go out over ICE. Mirrors upstream
+        // Endpoint.doSendSrtp: send, recycle the buffer, then fire the packet's onSent actions.
+        // The sent() call is essential — it drives TransportCcEngine.mediaPacketSent (via the
+        // TccSeqNumTagger's onSent hook), without which every tagged packet is never marked sent,
+        // transport-cc feedback can't be matched ("Received feedback before packet ... was
+        // indicated as sent"), and the bandwidth estimate is starved.
         transceiver.setOutgoingPacketHandler(packetInfo -> {
             Packet packet = packetInfo.getPacket();
             iceTransport.send(packet.getBuffer(), packet.getOffset(), packet.getLength());
+            ByteBufferPool.returnBuffer(packet.getBuffer());
+            packetInfo.sent();
         });
         // Fully-received (decrypted, parsed) RTP/RTCP is handed to the media layer.
         transceiver.setIncomingPacketHandler(this::handleReceivedMediaPacket);
@@ -457,6 +477,28 @@ public class SfuPeerConnection implements Closeable
     }
 
     /**
+     * Sends an RTCP keyframe request (PLI) to the remote peer for the given media SSRC, asking its
+     * encoder to emit a fresh keyframe. Use this when forwarding video so a downstream receiver
+     * that missed the initial keyframe can recover (see {@link #setKeyFrameRequestHandler}).
+     *
+     * @param mediaSsrc the SSRC of the remote stream to request a keyframe for.
+     */
+    public void requestKeyFrame(long mediaSsrc)
+    {
+        transceiver.requestKeyFrame(null, mediaSsrc);
+    }
+
+    /**
+     * Registers a handler invoked when the remote peer requests a keyframe (RTCP PLI/FIR) for an
+     * SSRC we are sending. The handler receives that SSRC; a forwarding host typically maps it to
+     * the upstream source and calls {@link #requestKeyFrame} on the connection carrying it.
+     */
+    public void setKeyFrameRequestHandler(LongConsumer handler)
+    {
+        this.keyFrameRequestHandler = handler;
+    }
+
+    /**
      * Returns a JSON-friendly snapshot of this connection's transports, for
      * diagnostics.
      */
@@ -469,6 +511,7 @@ public class SfuPeerConnection implements Closeable
         node.set("ice_transport", iceTransport.getDebugState());
         node.set("dtls_transport", dtlsTransport.getDebugState());
         node.set("sctp", sctpTransport.getDebugState());
+        node.set("transceiver", transceiver.getTransceiverStats().toJson());
         return node;
     }
 
@@ -600,6 +643,16 @@ public class SfuPeerConnection implements Closeable
                 if (track != null)
                 {
                     track.dispatch((RtpPacket) packet);
+                }
+            }
+            else if (packet instanceof RtcpFbPliPacket || packet instanceof RtcpFbFirPacket)
+            {
+                // The remote is asking for a keyframe on a stream we're sending. Surface the
+                // requested SSRC so a forwarding host can request one from the upstream source.
+                LongConsumer handler = keyFrameRequestHandler;
+                if (handler != null)
+                {
+                    handler.accept(((RtcpFbPacket) packet).getMediaSourceSsrc());
                 }
             }
         }
