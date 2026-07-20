@@ -1,0 +1,14 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "launchOptions": {
+      "headless": true,
+      "executablePath": "/opt/pw-browsers/chromium",
+      "args": [
+        "--use-fake-device-for-media-stream",
+        "--use-fake-ui-for-media-stream"
+      ]
+    }
+  },
+  "outputDir": "/tmp/playwright-mcp-output"
+}

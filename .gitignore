@@ -181,3 +181,9 @@ gradle-app.setting
 *.hprof
 
 # End of https://www.toptal.com/developers/gitignore/api/java,gradle,kotlin,intellij
+
+# Playwright MCP server output (browser-automation MCP for local testing)
+.playwright-mcp/
+
+# Playwright MCP runtime traces / session output
+.playwright-mcp/
