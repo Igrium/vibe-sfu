@@ -461,6 +461,17 @@ public class IceTransport
                 continue;
             }
             Component component = iceStream.getComponent(candidate.component);
+            if (component == null)
+            {
+                // The remote offered a candidate for an ICE component we don't have. Upstream
+                // jvb only ever receives Jitsi-generated candidates for its single (RTP)
+                // component, but a raw browser offer can include RTCP (component 2) candidates
+                // when its rtcp-mux policy gathers them as a fallback. We always rtcp-mux, so
+                // such candidates are irrelevant: skip them rather than NPE in canReach.
+                logger.debug(() -> "Ignoring remote candidate for unknown ICE component "
+                    + candidate.component + ": " + candidate.ip + ":" + candidate.port);
+                continue;
+            }
             RemoteCandidate remoteCandidate = new RemoteCandidate(
                 new TransportAddress(candidate.ip, candidate.port, Transport.parse(candidate.protocol)),
                 component,
