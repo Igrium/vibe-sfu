@@ -37,10 +37,13 @@
   .ok { color: #2a7; }
   .err { color: #d55; }
   .hint { color: #888; font-size: .85rem; }
+  #banner { background: #d5522a; color: #fff; padding: .6rem .8rem; border-radius: 6px;
+            margin-bottom: 1rem; font-size: .9rem; }
 </style>
 </head>
 <body>
 <h1>jitsi-sfu demo client</h1>
+<div id="banner" hidden></div>
 <div class="status">
   <span>Peer: <b id="name"></b></span>
   <span>ICE: <b id="ice">new</b></span>
@@ -271,25 +274,52 @@ function waitForGathering(pc) {
     });
 }
 
+function banner(text) {
+    const el = document.getElementById("banner");
+    el.textContent = text;
+    el.hidden = false;
+}
+
+// Acquires the camera and microphone independently, so a failure of one doesn't lose the
+// other, and the exact cause is surfaced. getUserMedia requires a secure context: Chrome
+// makes navigator.mediaDevices undefined on http:// origins other than localhost (a LAN IP
+// over http won't work), while Firefox is more permissive — hence "works in Firefox, not
+// Chrome, not even the self-view".
+async function acquireMedia() {
+    if (!window.isSecureContext || !navigator.mediaDevices) {
+        banner("Camera/microphone are disabled because this page isn't a secure context. "
+            + "Open it via http://localhost:8080 (not a LAN IP over http) or serve it over HTTPS. "
+            + "Chrome blocks getUserMedia otherwise (Firefox is more lenient). "
+            + "The data-channel chat still works.");
+        log("err", "insecure context: navigator.mediaDevices unavailable — no camera/mic");
+        return;
+    }
+    const tracks = [];
+    let haveVideo = false;
+    try {
+        const v = await navigator.mediaDevices.getUserMedia({ video: true });
+        for (const t of v.getVideoTracks()) { tracks.push(t); haveVideo = true; }
+    } catch (e) {
+        log("err", "camera failed: " + e.name + " — " + e.message);
+        banner("Camera unavailable on this browser: " + e.name + " (" + e.message + "). "
+            + "Audio and chat still work.");
+    }
+    try {
+        const a = await navigator.mediaDevices.getUserMedia({ audio: true });
+        for (const t of a.getAudioTracks()) tracks.push(t);
+    } catch (e) {
+        log("err", "microphone failed: " + e.name + " — " + e.message);
+    }
+    if (tracks.length === 0) return;
+    localStream = new MediaStream(tracks);
+    if (haveVideo) document.getElementById("localVideo").srcObject = localStream;
+    for (const track of tracks) pc.addTrack(track, localStream);
+    log("ok", "using local tracks: " + tracks.map(t => t.kind).join(", "));
+}
+
 (async () => {
     try {
-        try {
-            // Prefer audio+video; fall back to audio-only so the audio test still works on a
-            // machine with no camera.
-            let stream;
-            try {
-                stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-            } catch (_) {
-                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            }
-            localStream = stream;
-            document.getElementById("localVideo").srcObject = stream;
-            for (const track of stream.getTracks()) pc.addTrack(track, stream);
-            log("ok", "getUserMedia: " + stream.getTracks().map(t => t.kind).join(", "));
-        } catch (mediaErr) {
-            // Media is best-effort; the data-channel chat still works without it.
-            log("err", "getUserMedia failed: " + mediaErr);
-        }
+        await acquireMedia();
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);

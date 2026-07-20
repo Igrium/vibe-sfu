@@ -73,6 +73,8 @@ public final class DemoSfu
         final String id;
         final SfuPeerConnection connection;
         volatile DataChannelTrack track;
+        /** The browser's video source SSRC, so a looped-back keyframe request can be mapped back to it. */
+        volatile long remoteVideoSsrc = -1;
         /** Count of RTP packets forwarded (looped back) for this peer, exposed at {@code /debug}. */
         final AtomicLong forwardedRtpPackets = new AtomicLong();
 
@@ -192,6 +194,17 @@ public final class DemoSfu
         Peer peer = new Peer(peerId, connection);
         peers.put(peerId, peer);
 
+        // When the browser (as receiver of our looped-back video) asks for a keyframe, forward the
+        // request to its own encoder by requesting a keyframe on the source SSRC. Without this a
+        // receiver that misses the browser's single initial keyframe stays stuck on a black frame.
+        connection.setKeyFrameRequestHandler(requestedSsrc -> {
+            long source = peer.remoteVideoSsrc;
+            if (source >= 0)
+            {
+                connection.requestKeyFrame(source);
+            }
+        });
+
         connection.setRemoteDescription(offer.transport);
 
         List<SdpUtils.MediaAnswer> mediaAnswers = new ArrayList<>();
@@ -242,6 +255,10 @@ public final class DemoSfu
         }
         long remoteSsrc = offered.ssrcs.get(0);
         long localSsrc = kind == MediaKind.AUDIO ? LOCAL_AUDIO_SSRC : LOCAL_VIDEO_SSRC;
+        if (kind == MediaKind.VIDEO)
+        {
+            peer.remoteVideoSsrc = remoteSsrc;
+        }
 
         List<RtpExtension> extensions = new ArrayList<>();
         List<SdpUtils.Extmap> answeredExtmaps = new ArrayList<>();
