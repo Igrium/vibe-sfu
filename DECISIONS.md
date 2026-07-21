@@ -494,3 +494,59 @@ A → B → C compile-checkpointed and committed together (or A alone first if i
 verification commit. Commit + push after each green checkpoint. When A–E pass e2e, mark task #13 done,
 update this file's §5c (M8 DONE) and the README API docs, and note any new runtime lessons in Agents.md.
 
+## 9. Two-peer video forwarding: projection + probing (reliability fix)
+
+Symptom reported: forwarded video "works on Firefox but not Chrome", and the Playwright/Chromium
+two-peer test was flaky — exactly one direction would decode 0 frames (`framesDecoded=0`,
+`keyFramesDecoded=0`, PLIs climbing), randomly which side.
+
+Diagnosis was two distinct root causes, found in order:
+
+### 9.1 Raw sequence numbers → Chrome rejects (the Firefox/Chrome split)
+The demo forwarded raw RTP: it re-stamped the SSRC but passed the source's sequence numbers,
+timestamps and picture IDs through unchanged. Chrome's video path requires a transparent stream (no
+gaps in sequence numbers, continuous timestamps/picture IDs); Firefox tolerates discontinuities.
+This is exactly the transparency guarantee jitsi-videobridge's source projection provides
+(`svc.md`, and `Endpoint.preProcess` → `BitrateController.transformRtp` →
+`AdaptiveSourceProjection.rewriteRtp`).
+
+Decision: route forwarded video through the already-ported `AdaptiveSourceProjection` (M7), driven
+exactly as jvb drives it, but with a static "forward all temporal layers" target
+(`RtpLayerDesc.getIndex(0,0,7)`) instead of a BWE-driven target — a passthrough SFU does no
+bandwidth-adaptive layer selection. Lives in the library send path (`SfuPeerConnection.forwardRtp`
+→ `forwardVideoProjected`), keyed by source SSRC, mirroring jvb's
+`PacketHandler.adaptiveSourceProjectionMap` (which lives in the receiving endpoint). Public API:
+`MediaTrack.forwardRtp(RtpPacket, MediaTrack source)`; audio is still relayed as-is (jvb does not
+project audio seqnums). The receive track now exposes its `MediaSourceDesc` so the send side can
+build the projection. Note: with the Chromium fake device, VP8 packets lack a temporal-layer index,
+so the projection uses `GenericAdaptiveSourceProjectionContext` (seqnum/timestamp rewrite, gates on
+keyframes) rather than the VP8 context; real Chrome with temporal scalability would use the VP8
+context. Both keep the receiver's stream transparent.
+
+This fixed the Firefox/Chrome split and one class of failure, but left a residual flaky freeze.
+
+### 9.2 GoogleCc2 dummy padding on the media SSRC (the residual flake)
+Instrumenting the frozen receiver showed the SFU was handing the transceiver clean, complete
+keyframes (`header=28, payload~900`, monotonic dst seqnums), yet Chrome reported
+`headerBytesReceived≈266/pkt`, `bytesReceived≈0`, `framesReceived=0` — the signature of RTP
+**padding** packets, not media. Source: `ProbingDataSender.sendDummyData`. The default BWE engine
+(`GoogleCc2`) does autonomous bandwidth probing; when RTX is not negotiated it falls back to sending
+dummy `PaddingVideoPacket`s on `localVideoSsrc` (the same SSRC we project media onto) with a
+**random** starting sequence number. That random-seqnum padding stream shadows the projected media
+at the receiver (poisons its RTP/SRTP sequence baseline), so it decodes nothing. Flaky because
+probing only fires when the estimator decides to.
+
+Why jvb doesn't hit this: full jvb deployments always negotiate RTX, so probing goes over the
+separate RTX SSRC (`sendRedundantDataOverRtx`), never the dummy-padding path.
+
+Decision: default the library's BWE engine to the classic `GoogleCc` (a jvb-supported option) instead
+of `GoogleCc2`. Classic GoogleCc does TCC-based estimation with **no autonomous probing** (the
+`GoogleCc2`-only probing callback into `ProbingDataSender` is never wired), so no dummy padding is
+ever emitted. This is the correct default for a passthrough SFU that forwards raw RTP without RTX;
+probing/BWE-driven layer growth is useless here anyway (single layer, always forwarded). A user who
+negotiates RTX can switch back to `GoogleCc2`. Documented inline in `BandwidthEstimatorConfig`.
+
+Result: 8/8 staggered Chromium runs pass, both directions decode continuously (PLI 0 after startup)
+over sustained runs. Verified with `scratchpad/e2e-forward-video.js` (staggered join) and
+`diag-stagger.js` (per-direction frame counts).
+

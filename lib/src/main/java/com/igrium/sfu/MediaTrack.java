@@ -14,6 +14,7 @@
 
 package com.igrium.sfu;
 
+import org.jitsi.nlj.MediaSourceDesc;
 import org.jitsi.rtp.rtp.RtpPacket;
 
 import java.util.function.Consumer;
@@ -44,6 +45,13 @@ public class MediaTrack
     private final boolean local;
 
     private volatile Consumer<RtpPacket> rtpListener;
+
+    /**
+     * The {@link MediaSourceDesc} the library built for this (video receive) track. Non-null only
+     * for video receive tracks; it lets a send track project this source's packets into a clean,
+     * gap-free stream when forwarding (see {@link #forwardRtp}).
+     */
+    private volatile MediaSourceDesc sourceDesc;
 
     MediaTrack(SfuPeerConnection connection, MediaKind kind, long ssrc, boolean local)
     {
@@ -87,6 +95,12 @@ public class MediaTrack
     /**
      * Sends an RTP packet to the remote peer. Only valid on a send track. The packet is
      * cloned, so the caller retains ownership of its buffer.
+     *
+     * <p>This forwards the packet <em>as-is</em> (only the SSRC is left to the caller). When
+     * relaying media received from another peer, prefer {@link #forwardRtp}, which rewrites the
+     * stream so quality/source switches are transparent to the receiver; forwarding raw sequence
+     * numbers and picture IDs is tolerated by some browsers (Firefox) but rejected by others
+     * (Chrome), which then never decodes a frame.
      */
     public void sendRtp(RtpPacket packet)
     {
@@ -95,6 +109,49 @@ public class MediaTrack
             throw new IllegalStateException("sendRtp is only valid on a send track");
         }
         connection.sendRtp(packet);
+    }
+
+    /**
+     * Forwards an RTP packet received on {@code source} out over this send track, relaying it
+     * without transcoding. For video this projects the source stream onto this track's SSRC with
+     * clean, gap-free sequence numbers, timestamps and picture IDs (mirroring jitsi-videobridge's
+     * {@code Endpoint.preProcess} → {@code AdaptiveSourceProjection}); audio is relayed as-is with
+     * only its SSRC rewritten. The rewriting is what makes forwarded video decodable across
+     * browsers — Chrome in particular discards a stream whose sequence numbers or picture IDs are
+     * discontinuous. Packets are dropped while the projection waits for a keyframe (a keyframe
+     * request is issued back to the source automatically).
+     *
+     * <p>Only valid on a send track. The packet is cloned, so the caller retains ownership of its
+     * buffer; {@code source} must be a video receive track from {@link SfuPeerConnection#addReceiveTrack}.
+     *
+     * @param packet the RTP packet received on {@code source}.
+     * @param source the receive track the packet arrived on (its SSRC keys the projection).
+     */
+    public void forwardRtp(RtpPacket packet, MediaTrack source)
+    {
+        if (!local)
+        {
+            throw new IllegalStateException("forwardRtp is only valid on a send track");
+        }
+        connection.forwardRtp(this, packet, source);
+    }
+
+    /** The connection this track belongs to. */
+    SfuPeerConnection getConnection()
+    {
+        return connection;
+    }
+
+    /** The source description built for this (video receive) track, or null. */
+    MediaSourceDesc getSourceDesc()
+    {
+        return sourceDesc;
+    }
+
+    /** Records the source description the library built for this video receive track. */
+    void setSourceDesc(MediaSourceDesc sourceDesc)
+    {
+        this.sourceDesc = sourceDesc;
     }
 
     /** Called by {@link SfuPeerConnection} to deliver a received packet to the listener. */

@@ -26,6 +26,7 @@ import org.jitsi.nlj.Transceiver;
 import org.jitsi.nlj.TransceiverEventHandler;
 import org.jitsi.nlj.format.PayloadType;
 import org.jitsi.nlj.rtp.RtpExtension;
+import org.jitsi.nlj.rtp.VideoRtpPacket;
 import org.jitsi.nlj.rtp.codec.vpx.VpxRtpLayerDesc;
 import org.jitsi.nlj.srtp.TlsRole;
 import org.jitsi.nlj.util.Bandwidth;
@@ -40,6 +41,8 @@ import org.jitsi.utils.logging.DiagnosticContext;
 import org.jitsi.utils.logging2.Logger;
 import org.jitsi.utils.logging2.LoggerImpl;
 import org.jitsi.videobridge.TransportConfig;
+import org.jitsi.videobridge.cc.AdaptiveSourceProjection;
+import org.jitsi.videobridge.cc.RewriteException;
 import org.jitsi.videobridge.datachannel.DataChannel;
 import org.jitsi.videobridge.datachannel.DataChannelStack;
 import org.jitsi.videobridge.datachannel.protocol.DataChannelBinaryMessage;
@@ -146,6 +149,16 @@ public class SfuPeerConnection implements Closeable
      * set) each time a video receive track is added.
      */
     private final List<MediaSourceDesc> videoReceiveSources = new ArrayList<>();
+
+    /**
+     * Per-forwarded-source video projections for this connection's <em>send</em> side, keyed by the
+     * upstream source SSRC (see {@link #forwardRtp}). Mirrors upstream
+     * {@code BitrateController}/{@code PacketHandler.adaptiveSourceProjectionMap}, which lives in the
+     * receiving endpoint and holds one {@link AdaptiveSourceProjection} per source it forwards. Each
+     * rewrites its source into a clean, gap-free stream so quality/source switches are transparent
+     * to the receiver.
+     */
+    private final Map<Long, AdaptiveSourceProjection> sendProjections = new ConcurrentHashMap<>();
 
     /**
      * Enforces sequential processing of incoming data channel messages to maintain
@@ -418,11 +431,12 @@ public class SfuPeerConnection implements Closeable
             transceiver.addRtpExtension(extension);
         }
         transceiver.addReceiveSsrc(ssrc, kind.toMediaType());
+        MediaTrack track = new MediaTrack(this, kind, ssrc, /* local = */ false);
         if (kind == MediaKind.VIDEO)
         {
-            registerVideoReceiveSource(ssrc);
+            // Keep the source description so a send track can build a source projection for it.
+            track.setSourceDesc(registerVideoReceiveSource(ssrc));
         }
-        MediaTrack track = new MediaTrack(this, kind, ssrc, /* local = */ false);
         receiveTracks.put(ssrc, track);
         return track;
     }
@@ -432,13 +446,14 @@ public class SfuPeerConnection implements Closeable
      * receive SSRC and pushes the full accumulated set to the transceiver. Required for the
      * incoming video pipeline to resolve a packet's encoding (see {@link #videoReceiveSources}).
      */
-    private synchronized void registerVideoReceiveSource(long ssrc)
+    private synchronized MediaSourceDesc registerVideoReceiveSource(long ssrc)
     {
         RtpLayerDesc layer = new VpxRtpLayerDesc(0, 0, 0, RtpLayerDesc.NO_HEIGHT, RtpLayerDesc.NO_FRAME_RATE);
         RtpEncodingDesc encoding = new RtpEncodingDesc(ssrc, new RtpLayerDesc[] { layer });
         MediaSourceDesc source = new MediaSourceDesc(new RtpEncodingDesc[] { encoding }, id, "video-" + ssrc);
         videoReceiveSources.add(source);
         transceiver.setMediaSources(videoReceiveSources.toArray(new MediaSourceDesc[0]));
+        return source;
     }
 
     /**
@@ -477,6 +492,70 @@ public class SfuPeerConnection implements Closeable
     }
 
     /**
+     * Forwards a packet received on {@code source} out over {@code sendTrack} (called by
+     * {@link MediaTrack#forwardRtp}). Video is projected onto the send track's SSRC through an
+     * {@link AdaptiveSourceProjection} — the same class upstream's {@code Endpoint.preProcess} uses
+     * — rewriting sequence numbers, timestamps and picture IDs into a clean, gap-free stream so the
+     * relay is transparent to the receiver (a requirement in practice for Chrome). Because this is a
+     * passthrough SFU with no bandwidth adaptation, the projection target is pinned to "forward every
+     * temporal layer". Audio has no such requirement and is forwarded as-is with only its SSRC
+     * rewritten.
+     */
+    void forwardRtp(MediaTrack sendTrack, RtpPacket packet, MediaTrack source)
+    {
+        long downlinkSsrc = sendTrack.getSsrc();
+        if (sendTrack.getKind() == MediaKind.VIDEO
+            && source.getSourceDesc() != null
+            && packet instanceof VideoRtpPacket)
+        {
+            forwardVideoProjected(downlinkSsrc, (VideoRtpPacket) packet, source);
+        }
+        else
+        {
+            RtpPacket clone = packet.clone();
+            clone.setSsrc(downlinkSsrc);
+            transceiver.sendPacket(new PacketInfo(clone));
+        }
+    }
+
+    private void forwardVideoProjected(long downlinkSsrc, VideoRtpPacket packet, MediaTrack source)
+    {
+        long sourceSsrc = source.getSsrc();
+        AdaptiveSourceProjection projection = sendProjections.computeIfAbsent(sourceSsrc, s -> {
+            AdaptiveSourceProjection created = new AdaptiveSourceProjection(
+                diagnosticContext,
+                source.getSourceDesc(),
+                // When the projection needs a keyframe (e.g. before it can start), ask the upstream
+                // source to emit one. Mirrors upstream BitrateController.keyframeNeeded.
+                () -> source.getConnection().requestKeyFrame(sourceSsrc),
+                logger);
+            // Passthrough: forward all temporal layers (no bandwidth-driven layer selection).
+            created.setTargetIndex(RtpLayerDesc.getIndex(0, 0, 7));
+            return created;
+        });
+
+        PacketInfo packetInfo = new PacketInfo(packet.clone());
+        // The projection drops packets until it has a keyframe to anchor the clean stream; it
+        // requests one via the keyframe callback above, so dropping here is expected and recovers.
+        if (!projection.accept(packetInfo))
+        {
+            return;
+        }
+        try
+        {
+            projection.rewriteRtp(packetInfo);
+        }
+        catch (RewriteException e)
+        {
+            logger.warn("Failed to project a forwarded RTP packet", e);
+            return;
+        }
+        // Rewrite onto this connection's downlink SSRC (the projection rewrote to the source SSRC).
+        ((RtpPacket) packetInfo.getPacket()).setSsrc(downlinkSsrc);
+        transceiver.sendPacket(packetInfo);
+    }
+
+    /**
      * Sends an RTCP keyframe request (PLI) to the remote peer for the given media SSRC, asking its
      * encoder to emit a fresh keyframe. Use this when forwarding video so a downstream receiver
      * that missed the initial keyframe can recover (see {@link #setKeyFrameRequestHandler}).
@@ -512,6 +591,14 @@ public class SfuPeerConnection implements Closeable
         node.set("dtls_transport", dtlsTransport.getDebugState());
         node.set("sctp", sctpTransport.getDebugState());
         node.set("transceiver", transceiver.getTransceiverStats().toJson());
+        if (!sendProjections.isEmpty())
+        {
+            com.fasterxml.jackson.databind.node.ObjectNode proj =
+                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+            sendProjections.forEach((ssrc, p) ->
+                proj.set(Long.toString(ssrc), p.getDebugState(org.jitsi.nlj.DebugStateMode.FULL)));
+            node.set("send_projections", proj);
+        }
         return node;
     }
 

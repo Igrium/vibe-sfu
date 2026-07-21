@@ -64,7 +64,29 @@ public final class DemoSfu
     private final Map<String, Peer> peers = new ConcurrentHashMap<>();
     private final AtomicInteger nextPeerId = new AtomicInteger(1);
 
-    /** Local (server-chosen) SSRCs for the loopback send tracks; fits a 32-bit unsigned RTP SSRC. */
+    /** Drives the join-time keyframe requests and the periodic connection-status sweep. */
+    private final java.util.concurrent.ScheduledExecutorService scheduler =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "demo-sfu-scheduler");
+            t.setDaemon(true);
+            return t;
+        });
+
+    // Connection-status thresholds, mirroring jvb's ep-connection-status defaults
+    // (EndpointConnectionStatusConfig): give a peer this long to *start* sending before we give up
+    // on it, then drop it once it goes quiet for longer than the inactivity limit. Checked on a
+    // fixed interval. Adapted from jvb's EndpointConnectionStatusMonitor: jvb only *flags* inactive
+    // endpoints (removal comes later via Colibri signaling); this demo has no such signal, so a
+    // peer that goes inactive is simply expired and removed.
+    private static final long FIRST_TRANSFER_TIMEOUT_MS = 15_000;
+    private static final long MAX_INACTIVITY_LIMIT_MS = 8_000;
+    private static final long STATUS_CHECK_INTERVAL_MS = 500;
+
+    /**
+     * SSRCs the SFU uses for the downlink it sends to each peer (the media forwarded <em>from</em>
+     * the other peer). One audio + one video SSRC per peer is enough for the two-peer case; fits a
+     * 32-bit unsigned RTP SSRC.
+     */
     private static final long LOCAL_AUDIO_SSRC = 0x1BADB002L;
     private static final long LOCAL_VIDEO_SSRC = 0x1BADB003L;
 
@@ -73,10 +95,17 @@ public final class DemoSfu
         final String id;
         final SfuPeerConnection connection;
         volatile DataChannelTrack track;
-        /** The browser's video source SSRC, so a looped-back keyframe request can be mapped back to it. */
-        volatile long remoteVideoSsrc = -1;
-        /** Count of RTP packets forwarded (looped back) for this peer, exposed at {@code /debug}. */
+        /** The browser's uploaded video source SSRC, so keyframe requests can be routed back to it. */
+        volatile long videoSourceSsrc = -1;
+        /** The downlink tracks the SFU sends to this peer (carrying the other peer's media). */
+        volatile MediaTrack audioSendTrack;
+        volatile MediaTrack videoSendTrack;
+        /** Count of RTP packets forwarded to this peer, exposed at {@code /debug}. */
         final AtomicLong forwardedRtpPackets = new AtomicLong();
+        /** Wall-clock ms when this peer was created, for the first-transfer timeout. */
+        final long creationMs = System.currentTimeMillis();
+        /** Wall-clock ms of the last packet received from this peer; 0 means "never" (jvb's NEVER). */
+        volatile long lastIncomingActivityMs = 0;
 
         Peer(String id, SfuPeerConnection connection)
         {
@@ -98,6 +127,8 @@ public final class DemoSfu
         server.createContext("/offer", this::handleOffer);
         server.createContext("/debug", this::handleDebug);
         server.start();
+        scheduler.scheduleWithFixedDelay(this::monitorConnectionStatus,
+            STATUS_CHECK_INTERVAL_MS, STATUS_CHECK_INTERVAL_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
         System.out.println("Demo SFU listening on http://localhost:" + HTTP_PORT + "/");
     }
 
@@ -194,14 +225,17 @@ public final class DemoSfu
         Peer peer = new Peer(peerId, connection);
         peers.put(peerId, peer);
 
-        // When the browser (as receiver of our looped-back video) asks for a keyframe, forward the
-        // request to its own encoder by requesting a keyframe on the source SSRC. Without this a
-        // receiver that misses the browser's single initial keyframe stays stuck on a black frame.
+        // When this peer (a receiver of forwarded video) asks for a keyframe on its downlink, route
+        // the request to the source peer(s) feeding it, so their encoder emits a fresh keyframe.
+        // Mirrors jvb's BitrateController.keyframeNeeded. Without it a receiver that joins mid-stream
+        // (or drops a packet) stays stuck on a black frame.
         connection.setKeyFrameRequestHandler(requestedSsrc -> {
-            long source = peer.remoteVideoSsrc;
-            if (source >= 0)
+            for (Peer source : peers.values())
             {
-                connection.requestKeyFrame(source);
+                if (source != peer && source.videoSourceSsrc >= 0)
+                {
+                    source.connection.requestKeyFrame(source.videoSourceSsrc);
+                }
             }
         });
 
@@ -212,7 +246,7 @@ public final class DemoSfu
         {
             if ("audio".equals(md.kind) || "video".equals(md.kind))
             {
-                SdpUtils.MediaAnswer mediaAnswer = setupMediaLoopback(peer, md);
+                SdpUtils.MediaAnswer mediaAnswer = setupMediaForward(peer, md);
                 if (mediaAnswer != null)
                 {
                     mediaAnswers.add(mediaAnswer);
@@ -229,15 +263,16 @@ public final class DemoSfu
     }
 
     /**
-     * Registers a receive track for the browser's SSRC on this media section and a send track
-     * with our own SSRC, and wires the receive track's RTP straight back out the send track —
-     * the media analog of {@link #relayString}/{@link #relayBinary}, looped back to the same
-     * peer so a single browser is enough to prove RTP forwards end-to-end.
+     * Sets up one media section for a peer: a receive track for the browser's uploaded SSRC, and a
+     * downlink send track (with the SFU's own SSRC, declared in the answer) carrying the media
+     * forwarded <em>from the other peers</em>. Received RTP is re-stamped onto each other peer's
+     * matching downlink and sent out — a real selective-forwarding path (A's camera → B, B → A),
+     * not a self-loopback. The RTP is forwarded raw: no decode/re-encode.
      *
      * @return our answer for this section, or null if we can't/won't accept it (e.g. no
      *         supported codec offered), in which case the section is rejected in the SDP answer.
      */
-    private SdpUtils.MediaAnswer setupMediaLoopback(Peer peer, SdpUtils.MediaDescription offered)
+    private SdpUtils.MediaAnswer setupMediaForward(Peer peer, SdpUtils.MediaDescription offered)
     {
         MediaKind kind = "audio".equals(offered.kind) ? MediaKind.AUDIO : MediaKind.VIDEO;
         String codecName = kind == MediaKind.AUDIO ? "opus" : "VP8";
@@ -255,10 +290,6 @@ public final class DemoSfu
         }
         long remoteSsrc = offered.ssrcs.get(0);
         long localSsrc = kind == MediaKind.AUDIO ? LOCAL_AUDIO_SSRC : LOCAL_VIDEO_SSRC;
-        if (kind == MediaKind.VIDEO)
-        {
-            peer.remoteVideoSsrc = remoteSsrc;
-        }
 
         List<RtpExtension> extensions = new ArrayList<>();
         List<SdpUtils.Extmap> answeredExtmaps = new ArrayList<>();
@@ -275,12 +306,18 @@ public final class DemoSfu
         List<PayloadType> payloadTypes = List.of(payloadType);
         MediaTrack receiveTrack = peer.connection.addReceiveTrack(kind, remoteSsrc, payloadTypes, extensions);
         MediaTrack sendTrack = peer.connection.createSendTrack(kind, localSsrc, payloadTypes, extensions);
+        if (kind == MediaKind.AUDIO)
+        {
+            peer.audioSendTrack = sendTrack;
+        }
+        else
+        {
+            peer.videoSendTrack = sendTrack;
+            peer.videoSourceSsrc = remoteSsrc;
+        }
         receiveTrack.onRtpPacket(packet -> {
-            // Loopback: re-stamp with our own send SSRC (the one we declare in the SDP answer)
-            // and hand it straight back out, undecoded/unmodified otherwise.
-            packet.setSsrc(localSsrc);
-            sendTrack.sendRtp(packet);
-            peer.forwardedRtpPackets.incrementAndGet();
+            peer.lastIncomingActivityMs = System.currentTimeMillis();
+            forwardToOtherPeers(peer, kind, receiveTrack, packet);
         });
 
         SdpUtils.MediaAnswer answer = new SdpUtils.MediaAnswer(offered.mid, offered.kind);
@@ -290,6 +327,76 @@ public final class DemoSfu
         answer.ssrcs.add(localSsrc);
         answer.cname = "sfu-" + peer.id;
         return answer;
+    }
+
+    /**
+     * Periodic connection-status sweep, modeled on jvb's {@code EndpointConnectionStatusMonitor}: a
+     * peer that never starts sending (within {@link #FIRST_TRANSFER_TIMEOUT_MS}) or that goes quiet
+     * for longer than {@link #MAX_INACTIVITY_LIMIT_MS} is considered gone and expired. This is what
+     * removes a peer whose browser closed after ICE fully completed — that path surfaces no ICE
+     * failure (see IceTransport: a post-completion {@code COMPLETED -> TERMINATED} is normal, not a
+     * disconnect), so without this sweep such peers would linger as ghosts.
+     */
+    private void monitorConnectionStatus()
+    {
+        long now = System.currentTimeMillis();
+        for (Peer peer : peers.values())
+        {
+            long lastActivity = peer.lastIncomingActivityMs;
+            boolean expired;
+            if (lastActivity == 0)
+            {
+                expired = now - peer.creationMs > FIRST_TRANSFER_TIMEOUT_MS;
+            }
+            else
+            {
+                expired = now - lastActivity > MAX_INACTIVITY_LIMIT_MS;
+            }
+            if (expired && peers.remove(peer.id, peer))
+            {
+                System.out.println("[" + peer.id + "] expired (no activity); closing");
+                peer.connection.close();
+            }
+        }
+    }
+
+    /** Requests a keyframe from every connected peer's video source. */
+    private void requestKeyframesFromAll()
+    {
+        for (Peer p : peers.values())
+        {
+            if (p.videoSourceSsrc >= 0)
+            {
+                p.connection.requestKeyFrame(p.videoSourceSsrc);
+            }
+        }
+    }
+
+    /**
+     * Forwards a received RTP packet to every other connected peer's matching downlink track. Each
+     * destination's send track re-stamps the packet onto the SFU's downlink SSRC; for video it also
+     * projects the source into a clean, gap-free stream (see {@link MediaTrack#forwardRtp}) so the
+     * relay is decodable across browsers — forwarding raw sequence numbers works in Firefox but not
+     * Chrome. The packet is only valid during this call, but {@code forwardRtp} clones it, so
+     * forwarding per destination is safe. (Two peers is the intended case; with three or more,
+     * sources would collide on the single downlink SSRC — a demo limitation, not a library one.)
+     */
+    private void forwardToOtherPeers(Peer from, MediaKind kind, MediaTrack source,
+        org.jitsi.rtp.rtp.RtpPacket packet)
+    {
+        for (Peer to : peers.values())
+        {
+            if (to == from)
+            {
+                continue;
+            }
+            MediaTrack dst = kind == MediaKind.AUDIO ? to.audioSendTrack : to.videoSendTrack;
+            if (dst != null)
+            {
+                dst.forwardRtp(packet, source);
+                to.forwardedRtpPackets.incrementAndGet();
+            }
+        }
     }
 
     /**
@@ -367,6 +474,15 @@ public final class DemoSfu
         public void onConnected()
         {
             System.out.println("[" + peerId + "] connected (DTLS established)");
+            // A newly-connected peer begins sending and receiving now. Ask every peer for a fresh
+            // keyframe (a few times, to cover the setup race) so each receiver gets a decodable
+            // keyframe promptly instead of waiting on the encoder's periodic one. Mirrors jvb
+            // requesting a keyframe when it starts forwarding a source to a receiver.
+            for (long delayMs : new long[] { 0, 500, 1200 })
+            {
+                scheduler.schedule(DemoSfu.this::requestKeyframesFromAll,
+                    delayMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
         }
 
         @Override
@@ -377,6 +493,9 @@ public final class DemoSfu
             if (peer != null)
             {
                 peer.track = track;
+                // Opening the channel counts as activity, so a data-only peer isn't expired before
+                // its first message arrives.
+                peer.lastIncomingActivityMs = System.currentTimeMillis();
             }
         }
 
@@ -384,13 +503,24 @@ public final class DemoSfu
         public void onDataChannelStringMessage(DataChannelTrack track, String message)
         {
             System.out.println("[" + peerId + "] message: " + message);
+            stampActivity();
             relayString(peerId, message);
         }
 
         @Override
         public void onDataChannelBinaryMessage(DataChannelTrack track, byte[] message)
         {
+            stampActivity();
             relayBinary(peerId, message);
+        }
+
+        private void stampActivity()
+        {
+            Peer peer = peers.get(peerId);
+            if (peer != null)
+            {
+                peer.lastIncomingActivityMs = System.currentTimeMillis();
+            }
         }
 
         @Override

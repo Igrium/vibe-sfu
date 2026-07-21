@@ -23,7 +23,17 @@ import org.jitsi.nlj.util.Bandwidth;
 // (jmt.bwe.estimator.*) instead.)
 public class BandwidthEstimatorConfig
 {
-    public static final BandwidthEstimatorEngine engine = BandwidthEstimatorEngine.GoogleCc2;
+    // Upstream defaults to GoogleCc2. GoogleCc2 does autonomous bandwidth probing, which — when
+    // RTX is not negotiated — falls back to sending dummy padding packets on the media SSRC
+    // (see ProbingDataSender.sendDummyData) with a *random* sequence number. On a bridge/SFU that
+    // projects forwarded media onto that same SSRC (with a clean, low sequence-number space), that
+    // random-seqnum padding stream shadows the real media at the receiver (poisoning its RTP/SRTP
+    // sequence baseline), so the receiver decodes nothing. Full jitsi-videobridge deployments avoid
+    // this because they always negotiate RTX (probing then goes over the separate RTX SSRC). This
+    // library forwards raw RTP without requiring RTX, so it defaults to the classic GoogleCc engine,
+    // which jvb also supports and which performs TCC-based estimation without autonomous probing.
+    // A user who negotiates RTX can switch this back to GoogleCc2.
+    public static final BandwidthEstimatorEngine engine = BandwidthEstimatorEngine.GoogleCc;
 
     public static final Bandwidth initBw = Bandwidth.ofKbps(2500);
 

@@ -65,26 +65,29 @@
 
 <!-- ─────────────────────────────  AUDIO TEST  ───────────────────────────── -->
 <div class="panel">
-  <h2>Audio &mdash; loopback test</h2>
-  <p class="hint">Your microphone is sent to the SFU and looped straight back as raw RTP (no
-     transcoding). The meters below show live audio levels; enable playback to actually hear the
-     round-trip (headphones recommended to avoid feedback).</p>
+  <h2>Audio &mdash; forwarding test</h2>
+  <p class="hint">Your microphone is sent to the SFU, which forwards it as raw RTP (no transcoding)
+     to the other connected peer. Open a second tab to hear it. The meters below show live audio
+     levels; enable playback to actually hear the other peer (headphones recommended to avoid
+     feedback).</p>
   <div class="row" style="margin-bottom:.5rem">
     <button id="audioEnable">Enable audio meters</button>
     <label><input type="checkbox" id="playback"> Play looped-back audio (may echo)</label>
     <label><input type="checkbox" id="micMute"> Mute my mic</label>
   </div>
   <div class="meter"><label>My mic (outgoing)</label><canvas id="localMeter" width="260" height="16"></canvas></div>
-  <div class="meter"><label>Loopback (incoming)</label><canvas id="remoteMeter" width="260" height="16"></canvas></div>
+  <div class="meter"><label>Other peer (incoming)</label><canvas id="remoteMeter" width="260" height="16"></canvas></div>
   <audio id="remoteAudio" autoplay></audio>
 </div>
 
 <!-- ─────────────────────────────  VIDEO  ───────────────────────────── -->
 <div class="panel">
-  <h2>Video &mdash; loopback</h2>
+  <h2>Video &mdash; forwarded between peers</h2>
+  <p class="hint">The SFU forwards your camera to the other peer (and vice versa). Open a second tab
+     to see the other peer's video appear on the right.</p>
   <div class="videos">
-    <figure><video id="localVideo" autoplay playsinline muted></video><figcaption>local</figcaption></figure>
-    <figure><video id="remoteVideo" autoplay playsinline muted></video><figcaption>looped back from SFU</figcaption></figure>
+    <figure><video id="localVideo" autoplay playsinline muted></video><figcaption>my camera (local)</figcaption></figure>
+    <figure><video id="remoteVideo" autoplay playsinline muted></video><figcaption>other peer (via SFU)</figcaption></figure>
   </div>
 </div>
 
