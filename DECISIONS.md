@@ -550,3 +550,37 @@ Result: 8/8 staggered Chromium runs pass, both directions decode continuously (P
 over sustained runs. Verified with `scratchpad/e2e-forward-video.js` (staggered join) and
 `diag-stagger.js` (per-direction frame counts).
 
+
+## 10. Camera acquisition robustness in the testapp client (NotReadableError)
+
+Symptom: on some Chrome setups the client showed "Camera unavailable on this browser:
+NotReadableError (Could not start video source). Audio and chat still work." — audio and the data
+channel worked, only the camera failed. `NotReadableError` means the browser reached the device but
+the OS/browser could not *start* it. The common triggers here: (a) another tab or app already holds
+the physical camera and Chrome — unlike Firefox — will not always share it across tabs (this demo
+is explicitly a two-tab test, so it hits this directly); (b) the OS can't start the device at the
+requested format.
+
+This is a frontend (getUserMedia) concern, not the SFU pipeline. Changes are confined to
+`testapp/src/main/resources/web/index.html`:
+
+- **Console diagnostics** under a `[cam]` prefix: `enumerateDevices()` results, per-attempt
+  constraints, each failure's `name`/`message`, backoff notices, and the final chosen track's
+  `getSettings()`. Lets a NotReadableError be diagnosed from devtools without the on-page log.
+- **Retry with backoff**: `getUserMedia` for video is retried up to 4 times per constraint set with
+  exponential backoff (400/800/1600 ms), re-enumerating devices between tries. Covers the transient
+  "device still releasing / still starting" case. `NotAllowedError`/`SecurityError` are *not*
+  retried (a denied permission won't fix itself); `OverconstrainedError` skips straight to a looser
+  constraint set.
+- **Constraint fallbacks**: progressively looser video constraints (`{video:true}` → 640×480@15 →
+  max 640×480 → 320×240@10) for devices that can't start at the ideal format.
+- **Synthetic video fallback**: if the real camera still can't start, generate an animated video
+  track from a `<canvas>` via `captureStream(15)` labelled with the peer's name. This keeps the
+  SFU's video-forwarding path exercised (and the other peer still receives video) even when Chrome
+  won't share the one physical camera across two tabs — the whole point of the two-peer demo. Only
+  the pixels are synthetic; it's a real VP8-encodable track to the PeerConnection.
+
+Verified with `scratchpad/e2e-synthetic-fallback.js`: injects a getUserMedia that rejects video
+with NotReadableError in both tabs, confirms each peer adds a synthetic video sender and that both
+directions are forwarded through the SFU and decoded (framesDecoded > 5 each way). The normal
+camera path (`e2e-forward-video.js`) still passes, so the happy path is unaffected.

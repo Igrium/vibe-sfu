@@ -283,12 +283,118 @@ function banner(text) {
     el.hidden = false;
 }
 
+// ───────────────────────── Camera diagnostics ─────────────────────────
+// Everything the camera path does is mirrored to the browser devtools console under the
+// "[cam]" prefix, so a NotReadableError ("Could not start video source") can be diagnosed
+// without the on-page log. NotReadableError means the browser reached the device but the OS
+// refused to *start* it — most often because another tab/app already holds the camera
+// (Chrome does not always share a physical camera across tabs the way Firefox does), or the
+// requested resolution/framerate can't be started. We handle both: retry with backoff (for
+// the transient "device still releasing" case) and fall back through progressively looser
+// constraints (for the "can't start at this format" case).
+function camLog(...args) { console.log("[cam]", ...args); }
+
+async function logDevices(tag) {
+    try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cams = devices.filter(d => d.kind === "videoinput");
+        const mics = devices.filter(d => d.kind === "audioinput");
+        camLog(tag, "videoinput:", cams.length, "audioinput:", mics.length);
+        // labels are only populated once a getUserMedia permission has been granted
+        cams.forEach((d, i) => camLog(`  camera[${i}]`, "label:", JSON.stringify(d.label), "deviceId:", d.deviceId));
+    } catch (e) {
+        camLog(tag, "enumerateDevices failed:", e.name, e.message);
+    }
+}
+
+// Progressively looser video constraints. If the device can't start at a specific format,
+// a laxer request often succeeds. `true` is the browser's own default/ideal pick.
+const VIDEO_CONSTRAINT_FALLBACKS = [
+    { video: true },
+    { video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } } },
+    { video: { width: { max: 640 }, height: { max: 480 } } },
+    { video: { width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 10 } } },
+];
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Tries getUserMedia for video with retries (backoff) and constraint fallbacks. Retries are
+// aimed at NotReadableError/AbortError (device busy / still starting); OverconstrainedError
+// jumps straight to the next looser constraint set. Permission/secure-context errors
+// (NotAllowedError, SecurityError) are not retried — they won't fix themselves.
+async function getCameraStream() {
+    const maxAttempts = 4;                       // per constraint set
+    for (let ci = 0; ci < VIDEO_CONSTRAINT_FALLBACKS.length; ci++) {
+        const constraints = VIDEO_CONSTRAINT_FALLBACKS[ci];
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            camLog(`getUserMedia video — constraint set ${ci + 1}/${VIDEO_CONSTRAINT_FALLBACKS.length}, `
+                + `attempt ${attempt}/${maxAttempts}`, JSON.stringify(constraints));
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                const t = stream.getVideoTracks()[0];
+                camLog("camera started:", t && t.label, "settings:", t && JSON.stringify(t.getSettings ? t.getSettings() : {}));
+                return stream;
+            } catch (e) {
+                camLog("attempt failed:", e.name, "—", e.message);
+                if (e.name === "NotAllowedError" || e.name === "SecurityError") {
+                    throw e;                     // user/policy denied: retrying is pointless
+                }
+                if (e.name === "OverconstrainedError") {
+                    camLog("constraint too strict (", e.constraint, ") — moving to next fallback");
+                    break;                       // skip remaining attempts, try looser constraints
+                }
+                // NotReadableError / AbortError / TrackStartError / unknown: back off and retry.
+                if (attempt < maxAttempts) {
+                    const delay = 400 * Math.pow(2, attempt - 1);   // 400, 800, 1600 ms
+                    camLog(`backing off ${delay}ms before retry (device may be held by another tab/app)`);
+                    await sleep(delay);
+                    await logDevices("re-enumerate before retry:");
+                }
+            }
+        }
+    }
+    throw new DOMException("Could not start video source after retries and fallbacks", "NotReadableError");
+}
+
+// Synthetic camera fallback. When the real camera can't be started (e.g. Chrome won't share one
+// physical camera across two tabs), we still want to exercise the SFU's video-forwarding path, so
+// we generate an animated video track from a canvas via captureStream(). The pattern shows this
+// peer's name and a moving element, so on the *other* tab you can visually confirm the frames were
+// forwarded (and tell the two peers apart). This is a real VP8-encodable video track as far as the
+// PeerConnection is concerned — only the pixels are synthetic.
+function makeSyntheticVideoStream() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 320; canvas.height = 240;
+    const ctx = canvas.getContext("2d");
+    let hue = Math.floor(Math.random() * 360);   // per-peer colour so tabs are distinguishable
+    (function draw() {
+        const t = performance.now() / 1000;
+        ctx.fillStyle = `hsl(${hue}, 45%, 22%)`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // moving bar so motion (and thus encoded frame changes) is visible after forwarding
+        const x = (Math.sin(t) * 0.5 + 0.5) * (canvas.width - 40);
+        ctx.fillStyle = `hsl(${hue}, 70%, 55%)`;
+        ctx.fillRect(x, 100, 40, 40);
+        ctx.fillStyle = "#fff";
+        ctx.font = "18px system-ui, sans-serif";
+        ctx.fillText("synthetic: " + myName, 12, 30);
+        ctx.font = "13px system-ui, sans-serif";
+        ctx.fillText(new Date().toLocaleTimeString(), 12, canvas.height - 14);
+        requestAnimationFrame(draw);
+    })();
+    const stream = canvas.captureStream(15);   // 15 fps
+    camLog("using synthetic canvas video track (real camera unavailable)");
+    return stream;
+}
+
 // Acquires the camera and microphone independently, so a failure of one doesn't lose the
 // other, and the exact cause is surfaced. getUserMedia requires a secure context: Chrome
 // makes navigator.mediaDevices undefined on http:// origins other than localhost (a LAN IP
 // over http won't work), while Firefox is more permissive — hence "works in Firefox, not
 // Chrome, not even the self-view".
 async function acquireMedia() {
+    camLog("acquireMedia start — secureContext:", window.isSecureContext,
+        "mediaDevices:", !!navigator.mediaDevices, "userAgent:", navigator.userAgent);
     if (!window.isSecureContext || !navigator.mediaDevices) {
         banner("Camera/microphone are disabled because this page isn't a secure context. "
             + "Open it via http://localhost:8080 (not a LAN IP over http) or serve it over HTTPS. "
@@ -297,26 +403,47 @@ async function acquireMedia() {
         log("err", "insecure context: navigator.mediaDevices unavailable — no camera/mic");
         return;
     }
+    await logDevices("devices before acquisition:");
     const tracks = [];
     let haveVideo = false;
     try {
-        const v = await navigator.mediaDevices.getUserMedia({ video: true });
+        const v = await getCameraStream();
         for (const t of v.getVideoTracks()) { tracks.push(t); haveVideo = true; }
     } catch (e) {
+        camLog("camera permanently failed:", e.name, "—", e.message);
         log("err", "camera failed: " + e.name + " — " + e.message);
-        banner("Camera unavailable on this browser: " + e.name + " (" + e.message + "). "
-            + "Audio and chat still work.");
+        const hint = e.name === "NotReadableError"
+            ? " This usually means another tab or app already holds the camera "
+              + "(Chrome, unlike Firefox, may not share it across tabs), or the OS couldn't start it. "
+              + "Close other tabs/apps using the camera and reload."
+            : "";
+        // Fall back to a synthetic video track so the SFU's video-forwarding path is still
+        // exercised (and the other peer still receives video) when the real camera is unusable.
+        try {
+            const syn = makeSyntheticVideoStream();
+            for (const t of syn.getVideoTracks()) { tracks.push(t); haveVideo = true; }
+            log("", "camera unavailable — sending a synthetic video track instead");
+            banner("Camera unavailable (" + e.name + ")." + hint
+                + " Sending a synthetic test video instead so forwarding still works. Audio and chat still work.");
+        } catch (se) {
+            camLog("synthetic video fallback failed:", se.name, "—", se.message);
+            banner("Camera unavailable on this browser: " + e.name + " (" + e.message + ")." + hint
+                + " Audio and chat still work.");
+        }
     }
     try {
         const a = await navigator.mediaDevices.getUserMedia({ audio: true });
         for (const t of a.getAudioTracks()) tracks.push(t);
+        camLog("microphone started:", a.getAudioTracks()[0] && a.getAudioTracks()[0].label);
     } catch (e) {
+        camLog("microphone failed:", e.name, "—", e.message);
         log("err", "microphone failed: " + e.name + " — " + e.message);
     }
-    if (tracks.length === 0) return;
+    if (tracks.length === 0) { camLog("no local tracks acquired"); return; }
     localStream = new MediaStream(tracks);
     if (haveVideo) document.getElementById("localVideo").srcObject = localStream;
     for (const track of tracks) pc.addTrack(track, localStream);
+    camLog("using local tracks:", tracks.map(t => t.kind + (t.label ? "(" + t.label + ")" : "")).join(", "));
     log("ok", "using local tracks: " + tracks.map(t => t.kind).join(", "));
 }
 
