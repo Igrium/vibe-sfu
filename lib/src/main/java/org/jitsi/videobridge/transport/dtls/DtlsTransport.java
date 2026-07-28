@@ -161,8 +161,11 @@ public class DtlsTransport
         }
         catch (Throwable t)
         {
-            // TODO: we're not doing anything here, should we? or change the log?
             logger.error("Error during DTLS negotiation, closing this transport manager", t);
+            if (eventHandler != null)
+            {
+                eventHandler.handshakeFailed(t);
+            }
         }
     }
 
@@ -322,5 +325,14 @@ public class DtlsTransport
     public interface EventHandler
     {
         void handshakeComplete(int chosenSrtpProtectionProfile, TlsRole tlsRole, byte[] keyingMaterial);
+
+        /**
+         * The DTLS handshake failed and the transport cannot carry data. Upstream only logs
+         * this (see the {@code startDtlsHandshake} catch block and its {@code TODO}); the
+         * library adds this hook so the failure can be surfaced to the application.
+         */
+        default void handshakeFailed(Throwable t)
+        {
+        }
     }
 }

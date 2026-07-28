@@ -164,36 +164,77 @@ jitsi-srtp, dcsctp4j) is Apache-2.0; BouncyCastle is MIT-style. All compatible.
 
 ## 5. Public API surface (`com.igrium.sfu`) — webrtc-java-style
 
-Core classes (Endpoint → PeerConnection refactor):
+Core classes (Endpoint → PeerConnection refactor). **As-built names are noted where they
+diverged from this original sketch, so the doc matches the code:**
 - **`SfuPeerConnection`** — one peer connection. Configurable per-connection as
   offerer or answerer (`Role.OFFERER` / `Role.ANSWERER`). Wraps ICE+DTLS+SRTP+Transceiver.
-- **`SfuConnectionConfig` / builder** — ICE controlling, DTLS role, bundled config objects.
-- **Signalling I/O (host brings its own transport):** `setRemoteDescription(...)`,
-  `createOffer()/createAnswer()` returning plain transport-parameter objects,
-  `addRemoteCandidate(...)`; local candidates surface via `onIceCandidate`.
+- ~~**`SfuConnectionConfig` / builder**~~ — *not built as a separate class.* Per-connection
+  configuration is passed to the `SfuPeerConnection` constructor (`Role`, id, parent logger);
+  the transport config defaults live in the ported config classes (see §5b). A builder can be
+  added later if the option set grows, but it would be surface with no behaviour behind it today.
+- **Signalling I/O (host brings its own transport):** `setRemoteDescription(TransportDescription)`,
+  **`getLocalDescription()`** (one method serving both roles — replaces the sketched
+  `createOffer()/createAnswer()`, since this side only exchanges transport parameters, not full
+  SDP), `addRemoteCandidate(...)`. ICE candidates are gathered synchronously and returned
+  complete in the local description; `onIceCandidate` also replays them for hosts that trickle.
 - **Tracks:**
   - `MediaTrack` (audio/video) — default delivers **decrypted RTP payload, minimal
-    processing** via `onRtpPacket`; supports host-injected media via `sendRtp(...)`.
+    processing** via `onRtpPacket`; supports host-injected media via `sendRtp(...)` and
+    cross-peer relay via `forwardRtp(...)`.
   - `DataChannelTrack` — full WebRTC data-channel parity (string/binary, ordered/unordered,
     reliable/partial-reliability via maxRetransmits/maxPacketLifetime) over dcsctp4j.
-  - `addTrack(...)`, `removeTrack(...)` at runtime.
+  - Runtime track management (the sketched `addTrack`/`removeTrack`) is as-built:
+    **`addReceiveTrack(...)`** / **`createSendTrack(...)`** to add, **`removeReceiveTrack(...)`** /
+    **`removeSendTrack(...)`** to remove. Send-side add/remove after the first
+    `getLocalDescription()` fires `onRenegotiationNeeded()` (see the callback list below).
 
 ### Callback list (spec item 4) — `SfuPeerConnectionObserver`
-Minimum required by spec plus the rest of a complete WebRTC lifecycle:
-1. `onConnected()` — ICE connected **and** DTLS established (connection ready).
-2. `onRenegotiationNeeded()` — track add/remove requires new offer/answer.
-3. `onDisconnected()` — transport lost / peer gone.
-4. `onDtlsError(Throwable)` — DTLS handshake/transport failure.
-5. `onIceConnectionStateChange(IceState)` — new/checking/connected/failed/closed.
-6. `onIceCandidate(Candidate)` — locally gathered candidate for host to trickle.
-7. `onDataChannel(DataChannelTrack)` — remote-initiated data channel opened.
-8. `onDataChannelOpen(track)` / `onDataChannelClose(track)` — channel state.
-9. `onDataChannelMessage(track, StringOrBinary)` — inbound data-channel message.
-10. `onTrack(MediaTrack)` — remote audio/video track (new incoming SSRC/media) appeared.
-11. `onRtpPacket(MediaTrack, DecryptedRtp)` — decrypted inbound RTP payload (the SFU forward hook).
-12. `onBandwidthEstimateChanged(long bps)` — BWE update (for host forwarding decisions).
-13. `onClosed()` — connection fully torn down.
-14. `onError(Throwable)` — catch-all pipeline error.
+Minimum required by spec plus the rest of a complete WebRTC lifecycle. **Status reconciled with
+the shipped interface — every row is either implemented or has a documented reason it lives
+elsewhere, so this list and `SfuPeerConnectionObserver.java` agree:**
+
+1. `onConnected()` — ICE connected **and** DTLS established (connection ready). — **✅ implemented.**
+2. `onRenegotiationNeeded()` — a send-side track was added/removed after the first
+   `getLocalDescription()`, so the host must re-offer. — **✅ implemented.** Fired from
+   `createSendTrack`/`removeSendTrack`; silent before initial negotiation and after `close()`;
+   a burst of synchronous changes is coalesced into one callback (deferred ~20ms, mirroring the
+   browser negotiation-needed algorithm). Receive-side changes (`addReceiveTrack`/
+   `removeReceiveTrack`) deliberately do **not** fire it — they follow the remote's offer, they
+   don't originate a new one. Referenced against upstream `Endpoint`, which likewise pushes
+   updated source/SSRC mappings to the client when its media set changes (we own the SDP, so we
+   surface the same moment as a callback). Verified at runtime by `RenegotiationTest`.
+3. `onDisconnected()` — transport lost / peer gone. — **✅ implemented** (ICE failure).
+4. `onDtlsError(Throwable)` — DTLS handshake/transport failure. — **✅ implemented.** Added a
+   `handshakeFailed` hook to the ported `DtlsTransport.EventHandler` (upstream only logs at that
+   catch site — see its `TODO`) and forwarded it to the observer.
+5. `onIceConnectionStateChange(IceState)` — new/checking/connected/failed/closed. — **✅ implemented.**
+6. `onIceCandidate(Candidate)` — locally gathered candidate for host to trickle. — **✅ implemented,
+   with a caveat:** this library gathers ICE candidates synchronously and returns the *complete*
+   set from `getLocalDescription()`, so there is nothing to trickle from our side. The callback
+   replays that complete set (once, on first `getLocalDescription()`) for hosts that prefer an
+   event; the local description remains authoritative.
+7. `onDataChannel(DataChannelTrack)` — remote-initiated data channel opened. — **✅ implemented.**
+8. `onDataChannelOpen(track)` — **✅ implemented.** `onDataChannelClose(track)` — **not implemented,
+   by design:** upstream JVB's `DataChannel` models only open + message, and its SCTP callbacks
+   treat incoming stream resets as "surprising" (`DcSctpBaseCallbacks`, with the upstream comment
+   *"Does Chrome ever reset streams?"*). Adding a close notification would mean inventing an
+   SCTP-stream-reset → data-channel-close path that upstream does not have, which conflicts with
+   the faithful-port constraint. Left out; revisit only if a real close signal is needed.
+9. `onDataChannelMessage(track, StringOrBinary)` — inbound data-channel message. — **✅ implemented**
+   as two methods: `onDataChannelStringMessage` / `onDataChannelBinaryMessage`.
+10. `onTrack(MediaTrack)` — remote track appeared. — **folded into `addReceiveTrack`, not a separate
+    callback:** this is a signalling-agnostic library, so the host learns of remote media from its
+    own signalling (the remote SDP) and registers it via `addReceiveTrack`, which *returns* the
+    `MediaTrack`. A synchronous `onTrack` echoing that return value would be redundant, and the
+    pipeline cannot auto-discover an unregistered SSRC (video needs a pre-built `MediaSourceDesc`).
+11. `onRtpPacket(MediaTrack, DecryptedRtp)` — decrypted inbound RTP. — **implemented on `MediaTrack`,
+    not the observer, by design:** per-packet delivery is the hot path and belongs on the specific
+    receive track via `MediaTrack.onRtpPacket(Consumer<RtpPacket>)`, not a connection-wide fan-out.
+12. `onBandwidthEstimateChanged(long bps)` — BWE update. — **✅ implemented.** Forwarded from the
+    transceiver's `bandwidthEstimationChanged` (`newValue.getBps()`), mirroring upstream
+    `Endpoint.TransceiverEventHandlerImpl`.
+13. `onClosed()` — connection fully torn down. — **✅ implemented.**
+14. `onError(Throwable)` — catch-all pipeline error. — **✅ implemented.**
 
 ---
 

@@ -71,6 +71,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongConsumer;
@@ -120,6 +121,9 @@ public class SfuPeerConnection implements Closeable
         ANSWERER
     }
 
+    /** How long a renegotiation check is deferred so synchronous track changes coalesce. */
+    private static final long RENEGOTIATION_COALESCE_MS = 20;
+
     private final String id;
     private final Role role;
     private final SfuPeerConnectionObserver observer;
@@ -139,6 +143,9 @@ public class SfuPeerConnection implements Closeable
 
     /** Receive tracks keyed by SSRC, so incoming RTP can be dispatched to the right listener. */
     private final Map<Long, MediaTrack> receiveTracks = new ConcurrentHashMap<>();
+
+    /** Send tracks keyed by local SSRC, so they can be removed for runtime renegotiation. */
+    private final Map<Long, MediaTrack> sendTracks = new ConcurrentHashMap<>();
 
     /**
      * Minimal (non-simulcast) {@link MediaSourceDesc}s for video receive tracks, one per SSRC
@@ -181,6 +188,25 @@ public class SfuPeerConnection implements Closeable
 
     /** The last remote description, kept so trickled candidates can reuse ufrag/password. */
     private TransportDescription remoteDescription;
+
+    /**
+     * Whether an initial local description has been handed to the host yet (via
+     * {@link #getLocalDescription()}). Until then, runtime track changes need no
+     * {@link SfuPeerConnectionObserver#onRenegotiationNeeded()} — the first offer/answer
+     * already describes them. After it, a send-side change means the host must re-signal.
+     */
+    private volatile boolean negotiated = false;
+
+    /**
+     * The negotiation-needed latch: {@code renegotiationNeeded} records that a send-side change
+     * has happened since the last callback, and {@code renegotiationScheduled} records that a
+     * deferred check is already queued. Together they coalesce a burst of synchronous changes
+     * into a single {@link SfuPeerConnectionObserver#onRenegotiationNeeded()} while guaranteeing
+     * at least one callback after the final change — mirroring the browser negotiation-needed
+     * algorithm, which sets a flag and queues one check task rather than firing per {@code addTrack}.
+     */
+    private final AtomicBoolean renegotiationNeeded = new AtomicBoolean(false);
+    private final AtomicBoolean renegotiationScheduled = new AtomicBoolean(false);
 
     /**
      * Invoked when the remote peer requests a keyframe (RTCP PLI/FIR) for one of the SSRCs we are
@@ -257,6 +283,9 @@ public class SfuPeerConnection implements Closeable
                 public void bandwidthEstimationChanged(Bandwidth newValue)
                 {
                     logger.debug(() -> "Bandwidth estimation changed to " + newValue);
+                    // Forward to the host (mirrors upstream Endpoint.TransceiverEventHandlerImpl,
+                    // which feeds newValue.bps into the bitrate controller / connection stats).
+                    observer.onBandwidthEstimateChanged(newValue.getBps());
                 }
             },
             Clock.systemUTC());
@@ -313,7 +342,50 @@ public class SfuPeerConnection implements Closeable
         TransportDescription description = new TransportDescription();
         iceTransport.describe(description);
         dtlsTransport.describe(description);
+        if (!negotiated)
+        {
+            // Surface each (already fully gathered) local candidate for hosts that trickle;
+            // the returned description carries the same complete set (see onIceCandidate).
+            for (IceCandidate candidate : description.candidates)
+            {
+                observer.onIceCandidate(candidate);
+            }
+        }
+        // The host now has a local description to signal; any later send-side track change
+        // requires an explicit re-offer, so start reporting renegotiation from here on.
+        negotiated = true;
         return description;
+    }
+
+    /**
+     * Requests an {@link SfuPeerConnectionObserver#onRenegotiationNeeded()} callback because the
+     * local send-side media set changed. No-op before the first {@link #getLocalDescription()}
+     * (the initial description already covers the starting set) or after {@link #close()}.
+     * Multiple synchronous changes are coalesced into one callback.
+     */
+    private void signalRenegotiationNeeded()
+    {
+        if (!negotiated || closed.get())
+        {
+            return;
+        }
+        renegotiationNeeded.set(true);
+        // Defer the check briefly so a burst of synchronous track changes collapses into one
+        // callback (the queued check runs after the caller's changes are all in).
+        if (renegotiationScheduled.compareAndSet(false, true))
+        {
+            TaskPools.SCHEDULED_POOL.schedule(
+                this::fireRenegotiationIfNeeded, RENEGOTIATION_COALESCE_MS, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void fireRenegotiationIfNeeded()
+    {
+        renegotiationScheduled.set(false);
+        if (renegotiationNeeded.getAndSet(false) && negotiated && !closed.get())
+        {
+            observer.onRenegotiationNeeded();
+        }
     }
 
     /**
@@ -479,7 +551,68 @@ public class SfuPeerConnection implements Closeable
             transceiver.addRtpExtension(extension);
         }
         transceiver.setLocalSsrc(kind.toMediaType(), ssrc);
-        return new MediaTrack(this, kind, ssrc, /* local = */ true);
+        MediaTrack track = new MediaTrack(this, kind, ssrc, /* local = */ true);
+        sendTracks.put(ssrc, track);
+        // Adding an outbound stream after the connection is negotiated changes what the remote
+        // must expect, so ask the host to re-offer (mirrors browser addTrack → negotiationneeded).
+        signalRenegotiationNeeded();
+        return track;
+    }
+
+    /**
+     * Removes a send track previously created with {@link #createSendTrack}, stopping
+     * outbound media on its SSRC and asking the host to re-signal without it (fires
+     * {@link SfuPeerConnectionObserver#onRenegotiationNeeded()} if the connection is already
+     * negotiated). The host must stop calling {@link MediaTrack#sendRtp}/{@link MediaTrack#forwardRtp}
+     * on the track before removing it.
+     *
+     * @param track a send track from {@link #createSendTrack}.
+     */
+    public void removeSendTrack(MediaTrack track)
+    {
+        if (!track.isLocal())
+        {
+            throw new IllegalArgumentException("removeSendTrack requires a send track");
+        }
+        if (sendTracks.remove(track.getSsrc()) == null)
+        {
+            return;
+        }
+        signalRenegotiationNeeded();
+    }
+
+    /**
+     * Removes a receive track previously registered with {@link #addReceiveTrack}: stops
+     * dispatching its RTP, drops it from the media pipeline, and releases any forwarding
+     * projection built from it. This is the host acting on the remote having stopped a stream
+     * (or on its own re-offer), so it does <em>not</em> fire
+     * {@link SfuPeerConnectionObserver#onRenegotiationNeeded()} — receive-side changes follow
+     * from the remote's signalling, they do not originate a new offer from this side.
+     *
+     * @param track a receive track from {@link #addReceiveTrack}.
+     */
+    public void removeReceiveTrack(MediaTrack track)
+    {
+        if (track.isLocal())
+        {
+            throw new IllegalArgumentException("removeReceiveTrack requires a receive track");
+        }
+        long ssrc = track.getSsrc();
+        receiveTracks.remove(ssrc);
+        transceiver.removeReceiveSsrc(ssrc);
+        // Drop the per-source forwarding projection (keyed by the source SSRC; see forwardRtp).
+        sendProjections.remove(ssrc);
+        MediaSourceDesc sourceDesc = track.getSourceDesc();
+        if (sourceDesc != null)
+        {
+            synchronized (this)
+            {
+                if (videoReceiveSources.remove(sourceDesc))
+                {
+                    transceiver.setMediaSources(videoReceiveSources.toArray(new MediaSourceDesc[0]));
+                }
+            }
+        }
     }
 
     /**
@@ -688,19 +821,31 @@ public class SfuPeerConnection implements Closeable
     {
         dtlsTransport.incomingDataHandler = this::dtlsAppPacketReceived;
         dtlsTransport.outgoingDataHandler = iceTransport::send;
-        dtlsTransport.eventHandler = (chosenSrtpProtectionProfile, tlsRole, keyingMaterial) -> {
-            logger.info("DTLS handshake complete");
-            this.tlsRole = tlsRole;
-            // Hand the negotiated SRTP profile + keying material to the media pipeline so the
-            // receiver/sender can decrypt/encrypt. (cryptex is not negotiated in this slice.)
-            transceiver.setSrtpInformation(chosenSrtpProtectionProfile, tlsRole, keyingMaterial, false);
-            if (tlsRole == TlsRole.CLIENT)
+        dtlsTransport.eventHandler = new DtlsTransport.EventHandler()
+        {
+            @Override
+            public void handshakeComplete(int chosenSrtpProtectionProfile, TlsRole tlsRole, byte[] keyingMaterial)
             {
-                // The DTLS client initiates the SCTP association (mirrors upstream Relay;
-                // when we are the server, the remote peer connects to us).
-                sctpTransport.connect();
+                logger.info("DTLS handshake complete");
+                SfuPeerConnection.this.tlsRole = tlsRole;
+                // Hand the negotiated SRTP profile + keying material to the media pipeline so the
+                // receiver/sender can decrypt/encrypt. (cryptex is not negotiated in this slice.)
+                transceiver.setSrtpInformation(chosenSrtpProtectionProfile, tlsRole, keyingMaterial, false);
+                if (tlsRole == TlsRole.CLIENT)
+                {
+                    // The DTLS client initiates the SCTP association (mirrors upstream Relay;
+                    // when we are the server, the remote peer connects to us).
+                    sctpTransport.connect();
+                }
+                observer.onConnected();
             }
-            observer.onConnected();
+
+            @Override
+            public void handshakeFailed(Throwable t)
+            {
+                logger.error("DTLS handshake failed", t);
+                observer.onDtlsError(t);
+            }
         };
     }
 
