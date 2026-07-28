@@ -123,7 +123,9 @@ One WebRTC peer connection (ICE + DTLS + SCTP + data channels). `Closeable`.
 | `DataChannelTrack createDataChannel(String label)` | Create a reliable/ordered data channel. |
 | `DataChannelTrack createDataChannel(String label, DataChannelOptions)` | Create a data channel with explicit options. Opens automatically once the SCTP association is up. |
 | `MediaTrack addReceiveTrack(MediaKind, long ssrc, List<PayloadType>, List<RtpExtension>)` | Register a media stream to receive from the remote peer (SSRC, payload types and header extensions, typically parsed from its SDP). Decrypted RTP for this SSRC is delivered to the returned track's `onRtpPacket` listener. |
-| `MediaTrack createSendTrack(MediaKind, long ssrc, List<PayloadType>, List<RtpExtension>)` | Create a media stream to send to the remote peer (local SSRC + payload types/extensions). Use the returned track's `sendRtp` to send. |
+| `MediaTrack createSendTrack(MediaKind, long ssrc, List<PayloadType>, List<RtpExtension>)` | Create a media stream to send to the remote peer (local SSRC + payload types/extensions). Use the returned track's `sendRtp` to send. Adding one after the first `getLocalDescription()` fires `onRenegotiationNeeded()`. |
+| `void removeReceiveTrack(MediaTrack)` | Stop receiving a track from `addReceiveTrack`: drops it from the pipeline and releases its forwarding projection. Does **not** fire `onRenegotiationNeeded()` (receive-side changes follow the remote's signalling). |
+| `void removeSendTrack(MediaTrack)` | Stop sending a track from `createSendTrack`; fires `onRenegotiationNeeded()` if already negotiated. Stop calling `sendRtp`/`forwardRtp` on it first. |
 | `ObjectNode getDebugState()` | JSON diagnostics snapshot of the ICE/DTLS/SCTP transports. |
 | `void close()` | Tear everything down; fires `onClosed()`. Idempotent. |
 
@@ -134,12 +136,16 @@ All methods have no-op defaults. Callbacks run on internal library threads — d
 | Callback | Fired when |
 |---|---|
 | `onIceConnectionStateChange(IceConnectionState)` | ICE state transitions (`CHECKING`, `CONNECTED`, `FAILED`, `CLOSED`). |
+| `onIceCandidate(IceCandidate)` | A local ICE candidate is available to trickle. Candidates are gathered synchronously and also returned complete from `getLocalDescription()`, so there is nothing to trickle from our side — this replays that complete set (once, on the first `getLocalDescription()`) for hosts that prefer an event. |
 | `onConnected()` | ICE connected **and** DTLS handshake complete — the connection is usable. |
 | `onDisconnected()` | Transport lost (ICE failure). |
+| `onDtlsError(Throwable)` | The DTLS handshake failed; the connection can't carry media or data. Tear it down (and retry with fresh transport if desired). |
+| `onRenegotiationNeeded()` | A send track was added/removed after the first `getLocalDescription()`, so the host must generate a fresh offer and exchange it with the remote peer — the analogue of a browser `RTCPeerConnection`'s `negotiationneeded`. Only local send-side changes fire this (`createSendTrack`/`removeSendTrack`); registering a receive track follows the remote's offer and does not. Bursts of synchronous changes are coalesced into one callback. |
 | `onDataChannel(DataChannelTrack)` | The remote peer opened a data channel (already open and usable). |
 | `onDataChannelOpen(DataChannelTrack)` | A locally-created channel finished opening (remote acknowledged it). |
 | `onDataChannelStringMessage(DataChannelTrack, String)` | Inbound string message. |
 | `onDataChannelBinaryMessage(DataChannelTrack, byte[])` | Inbound binary message. |
+| `onBandwidthEstimateChanged(long bps)` | The connection's bandwidth estimate changed (bits per second), forwarded from the media pipeline's estimator — a forwarding host can use it to decide how much media to relay onto this connection. |
 | `onClosed()` | The connection is fully torn down. |
 | `onError(Throwable)` | Unrecoverable pipeline error (e.g. SCTP abort). |
 
