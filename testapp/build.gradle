@@ -23,7 +23,7 @@ repositories {
 }
 
 dependencies {
-    implementation project(':lib')
+    implementation project(':vibe-sfu')
     // Simple console logging for the demo
     implementation 'org.slf4j:slf4j-simple:2.0.18'
 }
