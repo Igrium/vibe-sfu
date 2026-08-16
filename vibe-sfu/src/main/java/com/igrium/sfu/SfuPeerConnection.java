@@ -148,6 +148,19 @@ public class SfuPeerConnection implements Closeable
     private final Map<Long, MediaTrack> sendTracks = new ConcurrentHashMap<>();
 
     /**
+     * The media sections of this connection, in creation order — the order their {@code m=} lines
+     * must keep across every offer/answer (JSEP forbids reordering or dropping sections, which is
+     * why stopped transceivers stay in this list). Guarded by itself.
+     */
+    private final List<MediaTransceiver> transceivers = new ArrayList<>();
+
+    /** Media-line ids handed out by {@link #reserveMid()}, shared by media and data sections. */
+    private final AtomicInteger nextMid = new AtomicInteger(0);
+
+    /** The mid reserved for the data channel ({@code m=application}) section; see {@link #getDataChannelMid()}. */
+    private volatile String dataChannelMid;
+
+    /**
      * Minimal (non-simulcast) {@link MediaSourceDesc}s for video receive tracks, one per SSRC
      * registered via {@link #addReceiveTrack}. The video receive pipeline
      * ({@code VideoQualityLayerLookup}) drops packets whose SSRC doesn't resolve to a layer here
@@ -363,7 +376,7 @@ public class SfuPeerConnection implements Closeable
      * (the initial description already covers the starting set) or after {@link #close()}.
      * Multiple synchronous changes are coalesced into one callback.
      */
-    private void signalRenegotiationNeeded()
+    void signalRenegotiationNeeded()
     {
         if (!negotiated || closed.get())
         {
@@ -611,6 +624,183 @@ public class SfuPeerConnection implements Closeable
                 {
                     transceiver.setMediaSources(videoReceiveSources.toArray(new MediaSourceDesc[0]));
                 }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Transceivers: media sections that can be declared before the remote peer speaks
+    // ------------------------------------------------------------------
+
+    /**
+     * Adds a media section to this connection and returns the {@link MediaTransceiver} representing
+     * it, with an auto-allocated mid, send SSRC and {@code msid} stream/track ids.
+     *
+     * <p>Unlike {@link #createSendTrack}/{@link #addReceiveTrack}, a transceiver can be created
+     * before the remote peer has signalled anything: the host describes it in its own offer and
+     * binds the remote SSRC later with {@link MediaTransceiver#setRemoteSsrc} once the answer names
+     * it. That is what lets this side introduce new streams without waiting to be offered them.
+     *
+     * <p>If {@code direction} sends, the send track is created immediately (available from
+     * {@link MediaTransceiver#getSender()}) and — once the connection has been negotiated —
+     * {@link SfuPeerConnectionObserver#onRenegotiationNeeded()} fires.
+     *
+     * @param kind audio or video.
+     * @param direction the direction of this section, from this side's point of view.
+     * @param payloadTypes the payload types to signal and feed to the media pipeline.
+     * @param extensions the RTP header extensions to signal and feed to the media pipeline.
+     */
+    public MediaTransceiver addTransceiver(
+        MediaKind kind, MediaDirection direction, List<PayloadType> payloadTypes, List<RtpExtension> extensions)
+    {
+        return addTransceiver(kind, direction, payloadTypes, extensions, null, null);
+    }
+
+    /**
+     * Adds a media section with explicit {@code msid} identifiers. Tracks sharing a
+     * {@code streamId} are grouped into one media stream by the remote peer (in a browser, they
+     * arrive in the same {@code MediaStream} on the {@code track} event), so an SFU typically uses
+     * one stream id per forwarded participant.
+     *
+     * @param streamId the {@code msid} media-stream id, or null to auto-generate one.
+     * @param trackId the {@code msid} track id, or null to auto-generate one.
+     * @see #addTransceiver(MediaKind, MediaDirection, List, List)
+     */
+    public MediaTransceiver addTransceiver(
+        MediaKind kind, MediaDirection direction, List<PayloadType> payloadTypes, List<RtpExtension> extensions,
+        String streamId, String trackId)
+    {
+        return addTransceiver(reserveMid(), kind, direction, payloadTypes, extensions,
+            allocateSsrc(), streamId, trackId);
+    }
+
+    /**
+     * Adds a media section with full control over its mid and send SSRC — for hosts that must
+     * match ids chosen elsewhere, e.g. when building transceivers to mirror the {@code m=} sections
+     * of a remote offer.
+     *
+     * @param mid the media-line id for this section. Must be unique on this connection.
+     * @param sendSsrc the local SSRC to send with (also signalled for a receive-only section, so it
+     *                 stays stable if the direction later becomes sending).
+     * @see #addTransceiver(MediaKind, MediaDirection, List, List)
+     */
+    public MediaTransceiver addTransceiver(
+        String mid, MediaKind kind, MediaDirection direction,
+        List<PayloadType> payloadTypes, List<RtpExtension> extensions,
+        long sendSsrc, String streamId, String trackId)
+    {
+        String stream = streamId != null ? streamId : id + "-" + mid;
+        String track = trackId != null ? trackId : kind.name().toLowerCase(Locale.ROOT) + "-" + mid;
+        MediaTransceiver transceiver = new MediaTransceiver(
+            this, mid, kind, direction, payloadTypes, extensions, sendSsrc, stream, track, "sfu-" + id);
+        synchronized (transceivers)
+        {
+            for (MediaTransceiver existing : transceivers)
+            {
+                if (existing.getMid().equals(mid))
+                {
+                    throw new IllegalArgumentException("A transceiver with mid '" + mid + "' already exists");
+                }
+            }
+            transceivers.add(transceiver);
+        }
+        // Creating the send track (and the renegotiation it implies) happens after the transceiver
+        // is registered, so a synchronous onRenegotiationNeeded already sees it in getTransceivers().
+        transceiver.initSendTrack();
+        return transceiver;
+    }
+
+    /**
+     * This connection's media sections in creation order, including stopped ones. Offers must keep
+     * emitting every section that has ever existed, in this order (JSEP forbids reordering or
+     * dropping them), which is why {@link MediaTransceiver#stop()} retires a transceiver rather
+     * than removing it — a stopped section is emitted as rejected.
+     */
+    public List<MediaTransceiver> getTransceivers()
+    {
+        synchronized (transceivers)
+        {
+            return List.copyOf(transceivers);
+        }
+    }
+
+    /** The transceiver with the given mid, or null if there is none. */
+    public MediaTransceiver getTransceiver(String mid)
+    {
+        synchronized (transceivers)
+        {
+            for (MediaTransceiver transceiver : transceivers)
+            {
+                if (transceiver.getMid().equals(mid))
+                {
+                    return transceiver;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Reserves the next media-line id. Media and data sections share one id space, so a host that
+     * signals a data channel alongside media should take its mid from here too (or from
+     * {@link #getDataChannelMid()}) rather than inventing one.
+     */
+    public String reserveMid()
+    {
+        return Integer.toString(nextMid.getAndIncrement());
+    }
+
+    /**
+     * The mid to use for this connection's data channel ({@code m=application}) section, reserving
+     * one on first call. Call it before adding transceivers if the data section should come first
+     * in the SDP — sections are conventionally emitted in mid order, and that order must stay
+     * stable across renegotiations.
+     */
+    public String getDataChannelMid()
+    {
+        String mid = dataChannelMid;
+        if (mid == null)
+        {
+            synchronized (transceivers)
+            {
+                if (dataChannelMid == null)
+                {
+                    dataChannelMid = reserveMid();
+                }
+                mid = dataChannelMid;
+            }
+        }
+        return mid;
+    }
+
+    /**
+     * Picks a local SSRC that is not already in use on this connection. Non-zero and within the
+     * 32-bit unsigned RTP SSRC range.
+     */
+    private long allocateSsrc()
+    {
+        while (true)
+        {
+            long ssrc = (long) (Math.random() * 0xFFFFFFFEL) + 1;
+            if (sendTracks.containsKey(ssrc) || receiveTracks.containsKey(ssrc))
+            {
+                continue;
+            }
+            boolean taken = false;
+            synchronized (transceivers)
+            {
+                for (MediaTransceiver transceiver : transceivers)
+                {
+                    if (transceiver.getSendSsrc() == ssrc)
+                    {
+                        taken = true;
+                        break;
+                    }
+                }
+            }
+            if (!taken)
+            {
+                return ssrc;
             }
         }
     }

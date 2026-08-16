@@ -82,6 +82,23 @@ public final class SdpUtils
             }
             return null;
         }
+
+        /**
+         * The {@code m=} section with the given {@code a=mid:}, or null. This is how the answer to
+         * an offer <em>we</em> built is read back: the mid identifies which of our media sections
+         * the remote is replying to, independently of section order or kind.
+         */
+        public MediaDescription getMediaByMid(String mid)
+        {
+            for (MediaDescription md : mediaDescriptions)
+            {
+                if (md.mid.equals(mid))
+                {
+                    return md;
+                }
+            }
+            return null;
+        }
     }
 
     /**
@@ -146,6 +163,16 @@ public final class SdpUtils
         public final List<Long> ssrcs = new ArrayList<>();
         /** The {@code cname} of the first {@code a=ssrc:...cname:...} line seen, if any. */
         public String cname;
+        /** The {@code msid} media-stream id, from {@code a=msid:} or {@code a=ssrc:...msid:}, if any. */
+        public String msidStream;
+        /** The {@code msid} track id, from {@code a=msid:} or {@code a=ssrc:...msid:}, if any. */
+        public String msidTrack;
+
+        /** Whether the section was rejected (port 0), e.g. an answer declining what we offered. */
+        public boolean isRejected()
+        {
+            return port == 0;
+        }
 
         /** The first codec whose name matches (case-insensitively), or null. */
         public Codec findCodec(String name)
@@ -176,27 +203,68 @@ public final class SdpUtils
     }
 
     /**
-     * What we (the answerer) advertise for one audio/video {@code m=} section of an answer:
-     * our chosen codec subset (must be PTs offered by the remote side), header extensions
-     * (echoing offered id/URI pairs we support), our sending SSRC(s), and direction.
+     * One {@code m=} section <em>we</em> emit: its codecs, header extensions, sending SSRC(s) and
+     * direction. Used both for the sections of an offer we originate (see
+     * {@link #buildOffer(TransportDescription, List)}) and, via {@link MediaAnswer}, for the
+     * sections of an answer.
      */
-    public static class MediaAnswer
+    public static class MediaSection
     {
-        /** Must match the {@code mid} of the offer section this answers. */
+        /** The {@code a=mid:} of this section. */
         public final String mid;
-        /** {@code "audio"} or {@code "video"}. */
+        /** {@code "audio"}, {@code "video"}, or {@code "application"} (a data channel section). */
         public final String kind;
+        /** {@code sendrecv}, {@code sendonly}, {@code recvonly} or {@code inactive}. */
         public String direction = "sendrecv";
         public final List<Codec> codecs = new ArrayList<>();
         public final List<Extmap> extmaps = new ArrayList<>();
         /** Our local SSRC(s) sent on this section. */
         public final List<Long> ssrcs = new ArrayList<>();
         public String cname = "sfu";
+        /**
+         * The {@code msid} media-stream id to advertise. Tracks sharing a stream id are grouped
+         * into one {@code MediaStream} by the receiver, so an SFU forwarding several participants
+         * gives each its own stream id and the receiver's audio/video pair up automatically.
+         * Null omits the {@code msid} attributes.
+         */
+        public String msidStream;
+        /** The {@code msid} track id to advertise. Ignored unless {@link #msidStream} is set. */
+        public String msidTrack;
+        /**
+         * Emits this section as rejected (port 0). An offer may not drop or reorder sections it
+         * has already used, so a section whose media has gone away is rejected in place.
+         */
+        public boolean rejected = false;
+        /** The SCTP port for an {@code "application"} section. Ignored for audio/video. */
+        public int sctpPort = 5000;
 
-        public MediaAnswer(String mid, String kind)
+        public MediaSection(String mid, String kind)
         {
             this.mid = mid;
             this.kind = kind;
+        }
+
+        /** A data channel ({@code m=application ... webrtc-datachannel}) section with the given mid. */
+        public static MediaSection dataChannel(String mid)
+        {
+            return new MediaSection(mid, "application");
+        }
+    }
+
+    /**
+     * What we (the answerer) advertise for one audio/video {@code m=} section of an answer:
+     * our chosen codec subset (must be PTs offered by the remote side), header extensions
+     * (echoing offered id/URI pairs we support), our sending SSRC(s), and direction.
+     */
+    public static class MediaAnswer extends MediaSection
+    {
+        /**
+         * @param mid must match the {@code mid} of the offer section this answers.
+         * @param kind {@code "audio"} or {@code "video"}.
+         */
+        public MediaAnswer(String mid, String kind)
+        {
+            super(mid, kind);
         }
     }
 
@@ -463,12 +531,36 @@ public final class SdpUtils
                 {
                     md.cname = attr.substring("cname:".length());
                 }
+                else if (attr.startsWith("msid:") && md.msidStream == null)
+                {
+                    // a=ssrc:<ssrc> msid:<stream id> <track id>
+                    parseMsid(attr.substring("msid:".length()), md);
+                }
             }
+        }
+        else if (line.startsWith("a=msid:"))
+        {
+            // a=msid:<stream id> <track id>
+            parseMsid(line.substring("a=msid:".length()), md);
         }
         else if (line.equals("a=sendrecv") || line.equals("a=recvonly")
             || line.equals("a=sendonly") || line.equals("a=inactive"))
         {
             md.direction = line.substring("a=".length());
+        }
+    }
+
+    /** Parses the {@code <stream id> <track id>} value of an {@code msid} attribute into {@code md}. */
+    private static void parseMsid(String value, MediaDescription md)
+    {
+        String[] parts = value.trim().split(" ");
+        if (parts.length > 0 && !parts[0].isEmpty())
+        {
+            md.msidStream = parts[0];
+        }
+        if (parts.length > 1)
+        {
+            md.msidTrack = parts[1];
         }
     }
 
@@ -603,6 +695,160 @@ public final class SdpUtils
         sdp.append("a=msid-semantic: WMS\r\n");
         appendApplicationMLine(sdp, local, mid, 5000);
         return sdp.toString();
+    }
+
+    /**
+     * Builds an SDP offer describing the given {@code m=} sections — the counterpart of
+     * {@link #buildAnswer(TransportDescription, ParsedSdp, List)} for a host that <em>originates</em>
+     * negotiation instead of responding to it. An SFU uses this to publish streams the remote peer
+     * never asked for: it declares a section per stream it intends to send (plus, typically, a
+     * {@link MediaSection#dataChannel} section) and offers them, rather than waiting for the peer
+     * to offer first and only being able to answer.
+     *
+     * <p>Sections are emitted in list order and BUNDLEd onto the single ICE/DTLS transport
+     * described by {@code local}, with {@code rtcp-mux}. JSEP requires every subsequent offer to
+     * keep the same sections, in the same order, with the same mids — so when a stream goes away,
+     * pass its section again with {@link MediaSection#rejected} set instead of dropping it from the
+     * list. (A {@link com.igrium.sfu.MediaTransceiver} preserves exactly that ordering: it stays in
+     * {@code SfuPeerConnection.getTransceivers()} after being stopped.)
+     *
+     * @param local our transport parameters, from
+     *              {@link com.igrium.sfu.SfuPeerConnection#getLocalDescription()}.
+     * @param sections the sections to offer, in a stable order.
+     */
+    public static String buildOffer(TransportDescription local, List<MediaSection> sections)
+    {
+        StringBuilder sdp = new StringBuilder();
+        sdp.append("v=0\r\n");
+        sdp.append("o=- 0 2 IN IP4 127.0.0.1\r\n");
+        sdp.append("s=-\r\n");
+        sdp.append("t=0 0\r\n");
+        sdp.append("a=group:BUNDLE");
+        for (MediaSection section : sections)
+        {
+            // Rejected sections are not part of the bundle group (JSEP); they keep their m= line
+            // only to preserve section order.
+            if (!section.rejected)
+            {
+                sdp.append(' ').append(section.mid);
+            }
+        }
+        sdp.append("\r\n");
+        sdp.append("a=msid-semantic: WMS\r\n");
+
+        for (MediaSection section : sections)
+        {
+            if (section.rejected)
+            {
+                appendRejectedMLine(sdp, section.kind, section.mid);
+            }
+            else if ("application".equals(section.kind))
+            {
+                appendApplicationMLine(sdp, local, section.mid, section.sctpPort);
+            }
+            else
+            {
+                appendOfferedMediaMLine(sdp, local, section);
+            }
+        }
+        return sdp.toString();
+    }
+
+    /**
+     * Appends an {@code m=audio}/{@code m=video} section we are offering: the codecs and header
+     * extensions we support (the answerer picks a subset), our direction, and — when we send on the
+     * section — our SSRC and {@code msid}, so the receiver knows which media stream the track
+     * belongs to before a single packet arrives.
+     */
+    private static void appendOfferedMediaMLine(StringBuilder sdp, TransportDescription local, MediaSection section)
+    {
+        sdp.append("m=").append(section.kind).append(" 9 UDP/TLS/RTP/SAVPF");
+        for (Codec codec : section.codecs)
+        {
+            sdp.append(' ').append(codec.pt);
+        }
+        sdp.append("\r\n");
+        sdp.append("c=IN IP4 0.0.0.0\r\n");
+        sdp.append("a=rtcp-mux\r\n");
+        sdp.append("a=mid:").append(section.mid).append("\r\n");
+        appendIceAndDtls(sdp, local);
+        for (Extmap extmap : section.extmaps)
+        {
+            sdp.append("a=extmap:").append(extmap.id).append(' ').append(extmap.uri).append("\r\n");
+        }
+        sdp.append("a=").append(section.direction).append("\r\n");
+        boolean sending = section.direction.startsWith("send");
+        if (sending && section.msidStream != null)
+        {
+            sdp.append("a=msid:").append(section.msidStream)
+                .append(' ').append(msidTrack(section)).append("\r\n");
+        }
+        for (Codec codec : section.codecs)
+        {
+            appendCodec(sdp, codec);
+        }
+        if (sending)
+        {
+            for (Long ssrc : section.ssrcs)
+            {
+                sdp.append("a=ssrc:").append(ssrc).append(" cname:").append(section.cname).append("\r\n");
+                if (section.msidStream != null)
+                {
+                    sdp.append("a=ssrc:").append(ssrc).append(" msid:").append(section.msidStream)
+                        .append(' ').append(msidTrack(section)).append("\r\n");
+                }
+            }
+        }
+        appendCandidates(sdp, local);
+    }
+
+    /** Appends {@code a=rtpmap}, {@code a=fmtp} and {@code a=rtcp-fb} for one codec. */
+    private static void appendCodec(StringBuilder sdp, Codec codec)
+    {
+        sdp.append("a=rtpmap:").append(codec.pt).append(' ').append(codec.name)
+            .append('/').append(codec.clockRate);
+        if (codec.channels > 1)
+        {
+            sdp.append('/').append(codec.channels);
+        }
+        sdp.append("\r\n");
+        for (String fb : codec.rtcpFb)
+        {
+            sdp.append("a=rtcp-fb:").append(codec.pt).append(' ').append(fb).append("\r\n");
+        }
+        if (!codec.fmtp.isEmpty())
+        {
+            sdp.append("a=fmtp:").append(codec.pt).append(' ');
+            boolean first = true;
+            for (Map.Entry<String, String> param : codec.fmtp.entrySet())
+            {
+                if (!first)
+                {
+                    sdp.append(';');
+                }
+                sdp.append(param.getKey());
+                if (!param.getValue().isEmpty())
+                {
+                    sdp.append('=').append(param.getValue());
+                }
+                first = false;
+            }
+            sdp.append("\r\n");
+        }
+    }
+
+    private static String msidTrack(MediaSection section)
+    {
+        return section.msidTrack != null ? section.msidTrack : section.mid;
+    }
+
+    /** Appends a rejected (port 0) {@code m=} section, which keeps its place in the section order. */
+    private static void appendRejectedMLine(StringBuilder sdp, String kind, String mid)
+    {
+        String proto = "application".equals(kind) ? "UDP/DTLS/SCTP webrtc-datachannel" : "UDP/TLS/RTP/SAVPF 0";
+        sdp.append("m=").append(kind).append(" 0 ").append(proto).append("\r\n");
+        sdp.append("c=IN IP4 0.0.0.0\r\n");
+        sdp.append("a=mid:").append(mid).append("\r\n");
     }
 
     /** Appends an {@code m=application ... webrtc-datachannel} section (data channel transport). */

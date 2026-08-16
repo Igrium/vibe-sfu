@@ -1,9 +1,12 @@
 /*
- * Demo SFU test application.
+ * Demo SFU test applications.
  *
- * A minimal SFU built on the jitsi-sfu library (`lib`): serves a browser test
- * client over HTTP, answers WebRTC offers (data-channel only) and relays data
- * channel messages between all connected peers.
+ * Two runnable demos built on the vibe-sfu library, each with its own browser client:
+ *
+ *  - DemoSfu (`run`, port 8080)             — the SFU answers offers made by the browser.
+ *  - ConferenceSfu (`runConference`, 8081)  — the SFU *makes* the offers: it declares its own
+ *                                             transceivers and data channel up front, so
+ *                                             participants can join and leave dynamically.
  */
 
 plugins {
@@ -30,6 +33,32 @@ dependencies {
 
 application {
     mainClass = 'com.igrium.sfu.testapp.DemoSfu'
+}
+
+// The dynamic conference demo. It serves HTTP on its own port (8081) so the two demos don't clash
+// there, but both harvest the same single ICE UDP port (10000), so run one at a time.
+tasks.register('runConference', JavaExec) {
+    group = 'application'
+    description = 'Runs the dynamic conference demo SFU (SFU-initiated offers) on http://localhost:8081/'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.igrium.sfu.testapp.ConferenceSfu'
+}
+
+// ...and a launcher for it in the installDist/distZip output, next to the `testapp` one.
+def conferenceStartScripts = tasks.register('conferenceStartScripts', CreateStartScripts) {
+    mainClass = 'com.igrium.sfu.testapp.ConferenceSfu'
+    applicationName = 'conference'
+    // Its own directory: the default `startScripts` task writes to build/scripts, and copying that
+    // whole directory into the distribution would duplicate the `testapp` launcher.
+    outputDir = layout.buildDirectory.dir('conferenceScripts').get().asFile
+    classpath = tasks.named('startScripts', CreateStartScripts).get().classpath
+}
+
+application {
+    applicationDistribution.into('bin') {
+        from(conferenceStartScripts)
+        filePermissions { unix(0755) }
+    }
 }
 
 java {
