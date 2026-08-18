@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>vibe-sfu conference client</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 1000px; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 .6rem; }
+  .status { display: flex; flex-wrap: wrap; gap: .5rem 1.2rem; margin-bottom: 1rem; }
+  .status b { font-variant-numeric: tabular-nums; }
+  .panel { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  .hint { color: #888; font-size: .85rem; }
+  button { padding: .4rem .8rem; cursor: pointer; }
+
+  .tiles { display: flex; gap: 1rem; flex-wrap: wrap; }
+  figure { margin: 0; }
+  video { width: 260px; height: 195px; background: #222; border-radius: 6px; object-fit: cover; }
+  figcaption { font-size: .8rem; color: #888; margin-top: .2rem; }
+
+  #chat { border: 1px solid #8884; border-radius: 6px; height: 10rem; overflow-y: auto;
+          padding: .5rem; background: #8881; margin-bottom: .5rem; }
+  .msg { margin: .15rem 0; }
+  .msg .who { font-weight: 600; }
+  .msg.me .who { color: #2a7; }
+  .msg.sys { color: #888; font-style: italic; }
+  #chatText { flex: 1 1 12rem; padding: .4rem; }
+
+  #log { border: 1px solid #8884; border-radius: 6px; padding: .5rem; min-height: 4rem;
+         max-height: 12rem; overflow-y: auto; white-space: pre-line; font-size: .85rem; }
+  .ok { color: #2a7; }
+  .err { color: #d55; }
+  #banner { background: #d5522a; color: #fff; padding: .6rem .8rem; border-radius: 6px;
+            margin-bottom: 1rem; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>vibe-sfu conference client</h1>
+<p class="hint">
+  This demo inverts the usual roles: <b>the SFU makes every offer</b>. Joining is one round trip —
+  the server's first offer already contains its own data channel, your uplink sections, and a
+  downlink for everyone already in the room. When somebody joins or leaves, the server re-offers
+  over that data channel; the browser only ever answers, so there is no glare.
+  Open this page in several tabs to watch tiles appear and disappear.
+</p>
+<div id="banner" hidden></div>
+<div class="status">
+  <span>Me: <b id="name"></b></span>
+  <span>ICE: <b id="ice">new</b></span>
+  <span>Signalling channel: <b id="dc">closed</b></span>
+  <span>Offers applied: <b id="offers">0</b></span>
+  <span>In room: <b id="count">0</b></span>
+</div>
+
+<div class="panel">
+  <h2>Participants</h2>
+  <div class="tiles" id="tiles">
+    <figure><video id="localVideo" autoplay playsinline muted></video>
+      <figcaption id="localCaption">me (local)</figcaption></figure>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Chat &mdash; over the SFU-created data channel</h2>
+  <p class="hint">The data channel is created by the <em>server</em> and arrives via
+     <code>ondatachannel</code>; it carries both renegotiation offers and this chat.</p>
+  <div id="chat" aria-live="polite"></div>
+  <div class="row">
+    <input id="chatText" placeholder="Type a message and press Enter…" autocomplete="off" disabled>
+    <button id="chatSend" disabled>Send</button>
+  </div>
+</div>
+
+<h2>Log</h2>
+<div id="log"></div>
+
+<script>
+"use strict";
+
+// ───────────────────────── State inspected by the Playwright test harness ─────────────────────────
+window.testState = {
+    name: new URLSearchParams(location.search).get("name") || ("peer" + Math.floor(Math.random() * 1000)),
+    peerId: null,
+    ice: "new",
+    dcOpen: false,
+    offersApplied: 0,        // how many SFU offers we have answered
+    remoteStreams: [],       // stream ids (== source participant ids) currently rendered
+    remoteTracks: [],        // kinds of remote tracks seen via pc.ontrack
+    messages: [],
+    errors: []
+};
+
+const logDiv = document.getElementById("log");
+function log(cls, text) {
+    const line = document.createElement("div");
+    line.className = cls;
+    line.textContent = text;
+    logDiv.appendChild(line);
+    logDiv.scrollTop = logDiv.scrollHeight;
+}
+function banner(text) {
+    const el = document.getElementById("banner");
+    el.textContent = text;
+    el.hidden = false;
+}
+
+const myName = testState.name;
+document.getElementById("name").textContent = myName;
+document.getElementById("localCaption").textContent = myName + " (me, local)";
+
+const pc = new RTCPeerConnection();
+window.pc = pc;                       // exposed for the Playwright harness (getStats)
+
+let signalChannel = null;             // the data channel the SERVER creates
+let localStream = null;
+let uplinkBound = false;
+let roster = {};
+
+pc.oniceconnectionstatechange = () => {
+    testState.ice = pc.iceConnectionState;
+    document.getElementById("ice").textContent = pc.iceConnectionState;
+    log("", "ICE state: " + pc.iceConnectionState);
+};
+
+// ───────────────────────── Remote tiles ─────────────────────────
+// Each downlink section the SFU offers carries an msid whose *stream id is the source
+// participant's id*, so a tile can be keyed straight off event.streams[0].id — the audio and video
+// of one participant arrive in the same MediaStream with no extra signalling.
+const tiles = new Map();   // participant id -> { figure, video, caption }
+
+function tileFor(streamId) {
+    let tile = tiles.get(streamId);
+    if (tile) return tile;
+    const figure = document.createElement("figure");
+    const video = document.createElement("video");
+    video.autoplay = true;
+    video.playsInline = true;
+    // Autoplay policy: a tab can only start audio unmuted after a user gesture. Start muted and
+    // let the user unmute; the SFU still receives and forwards the audio either way.
+    video.muted = true;
+    const caption = document.createElement("figcaption");
+    caption.textContent = streamId;
+    const unmute = document.createElement("button");
+    unmute.textContent = "unmute";
+    unmute.style.marginLeft = ".4rem";
+    unmute.onclick = () => {
+        video.muted = !video.muted;
+        unmute.textContent = video.muted ? "unmute" : "mute";
+    };
+    caption.appendChild(unmute);
+    figure.appendChild(video);
+    figure.appendChild(caption);
+    document.getElementById("tiles").appendChild(figure);
+    tile = { figure, video, caption, unmute };
+    tiles.set(streamId, tile);
+    updateCounts();
+    return tile;
+}
+
+function removeTile(streamId) {
+    const tile = tiles.get(streamId);
+    if (!tile) return;
+    tile.figure.remove();
+    tiles.delete(streamId);
+    updateCounts();
+    log("", "participant left: " + streamId);
+}
+
+function refreshCaptions() {
+    for (const [id, tile] of tiles) {
+        const label = roster[id] || id;
+        tile.caption.textContent = label === id ? id : (label + " (" + id + ")");
+        tile.caption.appendChild(tile.unmute);
+    }
+}
+
+function updateCounts() {
+    testState.remoteStreams = [...tiles.keys()];
+    document.getElementById("count").textContent = tiles.size + 1;   // + me
+}
+
+pc.ontrack = (event) => {
+    const stream = event.streams[0] || new MediaStream([event.track]);
+    testState.remoteTracks.push(event.track.kind);
+    log("ok", "ontrack: " + event.track.kind + " from " + stream.id);
+    const tile = tileFor(stream.id);
+    if (tile.video.srcObject !== stream) tile.video.srcObject = stream;
+    refreshCaptions();
+};
+
+// The SFU creates the data channel, so we receive it rather than creating it.
+pc.ondatachannel = (event) => {
+    signalChannel = event.channel;
+    signalChannel.onopen = () => {
+        testState.dcOpen = true;
+        document.getElementById("dc").textContent = "open";
+        chatText.disabled = false;
+        chatSend.disabled = false;
+        log("ok", "signalling channel open (created by the SFU)");
+        addChat(null, "Connected. Renegotiation offers and chat share this channel.", "sys");
+        send({ type: "name", name: myName });
+    };
+    signalChannel.onclose = () => {
+        testState.dcOpen = false;
+        document.getElementById("dc").textContent = "closed";
+        chatText.disabled = true;
+        chatSend.disabled = true;
+    };
+    signalChannel.onmessage = (e) => {
+        testState.messages.push(e.data);
+        onSignal(e.data);
+    };
+    signalChannel.onerror = (e) => {
+        testState.errors.push(String(e.error || e));
+        log("err", "data channel error: " + (e.error || e));
+    };
+};
+
+function send(obj) {
+    if (signalChannel && signalChannel.readyState === "open") {
+        signalChannel.send(JSON.stringify(obj));
+    }
+}
+
+// ───────────────────────── Chat ─────────────────────────
+const chatDiv = document.getElementById("chat");
+const chatText = document.getElementById("chatText");
+const chatSend = document.getElementById("chatSend");
+
+function addChat(who, text, cls) {
+    const line = document.createElement("div");
+    line.className = "msg " + (cls || "");
+    if (who !== null) {
+        const w = document.createElement("span");
+        w.className = "who";
+        w.textContent = who + ": ";
+        line.appendChild(w);
+    }
+    line.appendChild(document.createTextNode(text));
+    chatDiv.appendChild(line);
+    chatDiv.scrollTop = chatDiv.scrollHeight;
+}
+
+function sendChat() {
+    const text = chatText.value.trim();
+    if (!text) return;
+    send({ type: "chat", text });
+    addChat(myName + " (you)", text, "me");
+    chatText.value = "";
+}
+chatSend.onclick = sendChat;
+chatText.addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+
+// Kept for the Playwright harness: sends a raw chat message.
+window.sendMessage = (text) => send({ type: "chat", text });
+
+// ───────────────────────── Signalling ─────────────────────────
+async function onSignal(data) {
+    let msg;
+    try { msg = JSON.parse(data); } catch (_) { return; }
+    if (msg.type === "offer") {
+        const sdp = await handleOffer(msg);
+        send({ type: "answer", sdp });
+        log("ok", "renegotiated (" + Object.keys(msg.streams || {}).length + " downlink sections)");
+    } else if (msg.type === "chat") {
+        addChat(msg.name || msg.from, msg.text);
+    } else if (msg.type === "roster") {
+        roster = msg.participants || {};
+        refreshCaptions();
+    }
+}
+
+/**
+ * Applies an offer from the SFU and produces our answer. Two things are specific to being the
+ * *answering* side of an SFU-initiated negotiation:
+ *   - the uplink sections are offered to us as recvonly, so we flip them to sendonly and attach our
+ *     camera/mic with replaceTrack() — we never call addTrack(), which would create m= sections of
+ *     our own and force us to offer;
+ *   - `msg.streams` lists which mid carries which participant, so tiles for sections the server has
+ *     retired (emitted as rejected) can be dropped.
+ */
+async function handleOffer(msg) {
+    if (msg.peerId) {
+        testState.peerId = msg.peerId;
+    }
+    await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+    await bindUplink(msg.uplink);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await waitForGathering(pc);
+    if (msg.participants) {
+        roster = msg.participants;
+    }
+    pruneTiles(msg.streams || {});
+    refreshCaptions();
+    testState.offersApplied++;
+    document.getElementById("offers").textContent = testState.offersApplied;
+    return pc.localDescription.sdp;
+}
+
+// Attaches our microphone and camera to the recvonly sections the SFU offered for them. The
+// transceivers already exist (setRemoteDescription created them), so this needs no new m= lines and
+// therefore no offer from us.
+async function bindUplink(uplink) {
+    if (uplinkBound || !uplink || !localStream) return;
+    for (const kind of ["audio", "video"]) {
+        const mid = uplink[kind];
+        const track = localStream.getTracks().find(t => t.kind === kind);
+        if (mid === undefined || !track) continue;
+        const transceiver = pc.getTransceivers().find(t => t.mid === mid);
+        if (!transceiver) {
+            log("err", "no transceiver for uplink mid " + mid);
+            continue;
+        }
+        transceiver.direction = "sendonly";
+        await transceiver.sender.replaceTrack(track);
+        log("ok", "attached local " + kind + " to uplink mid " + mid);
+    }
+    uplinkBound = true;
+}
+
+// Drops tiles whose section the server no longer sends (a participant left, so its m= section came
+// back rejected and is absent from `streams`).
+function pruneTiles(streams) {
+    const live = new Set(Object.values(streams));
+    for (const id of [...tiles.keys()]) {
+        if (!live.has(id)) removeTile(id);
+    }
+}
+
+function waitForGathering(pc) {
+    if (pc.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise((resolve) => {
+        pc.addEventListener("icegatheringstatechange", () => {
+            if (pc.iceGatheringState === "complete") resolve();
+        });
+        setTimeout(resolve, 2000);   // host candidates are enough for a local test
+    });
+}
+
+// ───────────────────────── Local media ─────────────────────────
+// A synthetic canvas track stands in when the real camera can't start — Chrome will not always
+// share one physical camera across tabs, and this demo is meant to be opened in several. The
+// pattern names the peer and moves, so forwarded frames are recognisable on the other tabs.
+function makeSyntheticVideoTrack() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 320; canvas.height = 240;
+    const ctx = canvas.getContext("2d");
+    const hue = Math.floor(Math.random() * 360);
+    (function draw() {
+        const t = performance.now() / 1000;
+        ctx.fillStyle = `hsl(${hue}, 45%, 22%)`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const x = (Math.sin(t) * 0.5 + 0.5) * (canvas.width - 40);
+        ctx.fillStyle = `hsl(${hue}, 70%, 55%)`;
+        ctx.fillRect(x, 100, 40, 40);
+        ctx.fillStyle = "#fff";
+        ctx.font = "18px system-ui, sans-serif";
+        ctx.fillText(myName, 12, 30);
+        ctx.font = "13px system-ui, sans-serif";
+        ctx.fillText(new Date().toLocaleTimeString(), 12, canvas.height - 14);
+        requestAnimationFrame(draw);
+    })();
+    return canvas.captureStream(15).getVideoTracks()[0];
+}
+
+// A silent audio track, so the uplink audio section always has something to carry when the mic is
+// unavailable (headless/CI, or permission denied).
+function makeSilentAudioTrack() {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const oscillator = ac.createOscillator();
+    const gain = ac.createGain();
+    gain.gain.value = 0.02;                 // barely audible, but real RTP
+    oscillator.frequency.value = 220 + Math.floor(Math.random() * 220);
+    oscillator.connect(gain);
+    const destination = ac.createMediaStreamDestination();
+    gain.connect(destination);
+    oscillator.start();
+    return destination.stream.getAudioTracks()[0];
+}
+
+async function acquireMedia() {
+    const tracks = [];
+    if (!window.isSecureContext || !navigator.mediaDevices) {
+        banner("Camera/microphone are disabled because this page isn't a secure context. "
+            + "Open it via http://localhost:8081 (not a LAN IP over http) or serve it over HTTPS. "
+            + "Synthetic media is used instead so forwarding still works.");
+        log("err", "insecure context: no camera/mic — using synthetic media");
+    } else {
+        try {
+            const cam = await navigator.mediaDevices.getUserMedia({ video: true });
+            tracks.push(...cam.getVideoTracks());
+        } catch (e) {
+            log("err", "camera failed (" + e.name + ") — using a synthetic video track");
+        }
+        try {
+            const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+            tracks.push(...mic.getAudioTracks());
+        } catch (e) {
+            log("err", "microphone failed (" + e.name + ") — using a synthetic audio track");
+        }
+    }
+    if (!tracks.some(t => t.kind === "video")) tracks.push(makeSyntheticVideoTrack());
+    if (!tracks.some(t => t.kind === "audio")) tracks.push(makeSilentAudioTrack());
+    localStream = new MediaStream(tracks);
+    document.getElementById("localVideo").srcObject = localStream;
+    log("ok", "local tracks: " + tracks.map(t => t.kind).join(", "));
+}
+
+// ───────────────────────── Join ─────────────────────────
+(async () => {
+    try {
+        await acquireMedia();
+
+        // One round trip: the server's offer already describes the whole room.
+        const joinResponse = await fetch("/join?name=" + encodeURIComponent(myName), { method: "POST" });
+        if (!joinResponse.ok) throw new Error("join failed: HTTP " + joinResponse.status + " " + await joinResponse.text());
+        const offer = await joinResponse.json();
+        testState.peerId = offer.peerId;
+        log("", "joined as " + offer.peerId + "; SFU offered "
+            + (Object.keys(offer.streams || {}).length) + " downlink sections");
+
+        const answerSdp = await handleOffer(offer);
+        const answerResponse = await fetch("/answer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ peerId: offer.peerId, sdp: answerSdp })
+        });
+        if (!answerResponse.ok) throw new Error("answer failed: HTTP " + answerResponse.status);
+        const state = await answerResponse.json();
+        roster = state.participants || {};
+        refreshCaptions();
+        log("", "answer applied, connecting…");
+    } catch (e) {
+        testState.errors.push(String(e));
+        log("err", String(e));
+    }
+})();
+
+// Tell the server promptly, so the other tabs' tiles disappear without waiting for the
+// inactivity sweep.
+window.addEventListener("pagehide", () => {
+    if (testState.peerId && navigator.sendBeacon) {
+        navigator.sendBeacon("/leave?peerId=" + encodeURIComponent(testState.peerId), "");
+    }
+});
+</script>
+</body>
+</html>

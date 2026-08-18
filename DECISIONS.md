@@ -6,6 +6,37 @@ Java SFU library (`webrtc-java`-style API), with conference/XMPP/REST stripped.
 
 Status: **MILESTONES M1–M8 COMPLETE — the full jitsi-videobridge media pipeline is ported (RTP/RTCP, codec parsing, BWE/TCC, bitrate controller + frame projection, Transceiver) and wired behind the `com.igrium.sfu` API; audio/video forwarding is proven end-to-end through a real browser (Playwright fake-media e2e). Follow-ups: docs polish, two-peer forwarding demo, and opportunistic wiring of the M1 BitrateCalculator TODO markers.**
 
+### SFU-initiated offers + transceiver abstraction (2026-08-16, user)
+- **Requirement:** the library must let a host **add audio/video tracks itself and have them
+  carried in an offer it sends to the browser**, so a stream can be introduced when a client
+  joins without waiting for the client to (re-)offer. Previously only the answerer direction
+  existed: `addReceiveTrack`/`createSendTrack` describe media that signalling already mentions,
+  and `SdpUtils.buildOffer` was data-channel-only — so a new participant could not be published
+  to an existing peer at all.
+- **Ruling:** add a `MediaTransceiver` abstraction (the library's `RTCRtpTransceiver`): one `m=`
+  section, stable mid, at most one send + one receive track, plus the SSRC/`msid`/codecs needed
+  to describe it *before the remote peer has signalled anything*. Bind the remote SSRC later
+  with `setRemoteSsrc` once the answer names it.
+- **Additive only.** `addReceiveTrack`/`createSendTrack`/`buildAnswer` are untouched and
+  `DemoSfu`'s behaviour is unchanged; the transceiver API is built on top of them. New public
+  types: `MediaTransceiver`, `MediaDirection`, `SdpUtils.MediaSection` (with `MediaAnswer` as its
+  answer-side subclass), `SdpUtils.buildOffer(local, List<MediaSection>)`, `msid` parse/emit,
+  `ParsedSdp.getMediaByMid`.
+- **Section ordering is the load-bearing constraint.** JSEP forbids reordering or dropping `m=`
+  sections between offers, so `MediaTransceiver.stop()` retires a transceiver but keeps it in
+  `getTransceivers()`; its section is re-emitted as rejected (port 0). Mids come from one shared
+  space (`reserveMid()`/`getDataChannelMid()`) covering media and data alike.
+- **Second demo, not a modified one.** `ConferenceSfu` (port 8081) + `web/conference.html`
+  demonstrate the offerer direction — SFU-created data channel in the initial offer, recvonly
+  uplink sections the browser binds with `replaceTrack`, one sendonly pair per other participant
+  (`msid` stream id = participant id), dynamic join/leave driven by `onRenegotiationNeeded()` over
+  that data channel. `DemoSfu` (8080) is left exactly as it was. Both are Playwright-verified;
+  they share ICE UDP 10000, so they run one at a time.
+- **Renegotiation does not re-apply transport parameters.** A re-offer that only changes media
+  reuses the established ICE/DTLS transport, so `setRemoteDescription` is used for the initial
+  exchange only. (This also sidesteps `DtlsStack.actAsServer()` replacing the role object.)
+- Because the SFU is the only offerer in that demo, **glare is impossible by construction**.
+
 ### Media forwarding requirement (2026-07-08, user)
 - Client/host apps **must be able to forward audio/video streams directly without
   decoding/re-encoding**. The media path hands the host the **decrypted RTP packet**

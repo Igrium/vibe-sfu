@@ -5,20 +5,20 @@ rules to follow when extending it.
 
 ## What this project is
 
-A standalone Java library (`lib`) exposing a programmatic WebRTC SFU stack, produced by
-**porting** jitsi-videobridge's pipeline to Java — not by re-designing it. A demo
-application (`testapp`) exercises it end-to-end against real browsers.
+A standalone Java library (the `vibe-sfu` Gradle module) exposing a programmatic WebRTC SFU
+stack, produced by **porting** jitsi-videobridge's pipeline to Java — not by re-designing it.
+Two demo applications (`testapp`) exercise it end-to-end against real browsers.
 
-Current state: the **data-channel vertical slice** works end-to-end (ICE, DTLS, SCTP,
-data channels, verified with Playwright + Chromium). The RTP/SRTP media path (Transceiver,
-incoming/outgoing pipelines, codec parsing, simulcast/SVC, BWE) is the next porting phase;
-its foundations (`org.jitsi.rtp`, the `org.jitsi.nlj` node framework, SRTP transformers)
-are already ported.
+Current state: **complete**. ICE, DTLS, SCTP, data channels *and* the full RTP/SRTP media path
+(Transceiver, incoming/outgoing pipelines, codec parsing, simulcast/SVC frame projection, BWE)
+are ported and verified with Playwright + Chromium (fake media devices). The public API also
+covers SFU-initiated negotiation: `MediaTransceiver` declares `m=` sections before the remote
+peer has signalled anything, so the host can build its own offers.
 
 ## Layout
 
 ```
-lib/src/main/java/
+vibe-sfu/src/main/java/
   org/jitsi/rtp/            ← ported packet model (upstream rtp/, Kotlin→Java)
   org/jitsi/nlj/            ← ported pipeline core, dtls/, srtp/ (upstream jitsi-media-transform/)
   org/jitsi/videobridge/    ← ported transports + data channels (upstream jvb/)
@@ -30,7 +30,11 @@ lib/src/main/java/
     ice/, util/             ← Harvesters/IceConfig/TransportUtils; ByteBufferPool/TaskPools
   com/igrium/sfu/           ← NEW public API (SfuPeerConnection & friends)
   com/igrium/sfu/sdp/       ← NEW optional SDP glue (core stays SDP-free)
-testapp/                    ← demo SFU + browser client (web/index.html)
+testapp/                    ← two demo SFUs + browser clients:
+    DemoSfu / web/index.html      ← browser offers, SFU answers (port 8080)
+    ConferenceSfu / web/conference.html
+                                  ← SFU offers: transceivers + SFU-created data
+                                    channel, dynamic join/leave (port 8081)
 reference/jitsi-videobridge ← upstream source (READ-ONLY reference for porting)
 DECISIONS.md                ← decision log + porting resume state
 ```
@@ -45,7 +49,7 @@ DECISIONS.md                ← decision log + porting resume state
 - **Don't re-verify verified work.** When delegating to a subagent, paste the exact
   signatures/facts it needs into the prompt instead of sending it to re-read
   already-ported files, and tell it to trust them. Subagents compile once at the end at
-  most; the orchestrator's own final `gradle :lib:compileJava` before committing is the
+  most; the orchestrator's own final `gradle :vibe-sfu:compileJava` before committing is the
   verification of record. Reports cover exceptions (deviations, skips), not restatements
   of what went as instructed.
 
@@ -110,23 +114,52 @@ DECISIONS.md                ← decision log + porting resume state
 
 ## Verifying changes
 
-`testapp` + Playwright is the end-to-end harness:
+`testapp` + Playwright is the end-to-end harness. There are two demos, and **both** must stay
+green after a change to the public API or the SDP glue:
 
 ```sh
 gradle :testapp:installDist
-testapp/build/install/testapp/bin/testapp &   # http://localhost:8080
-# then drive two browser contexts at / (see e2e notes in DECISIONS.md):
-# both must reach ICE connected + data channel open, and messages sent from
-# each must arrive at the other via the SFU. /debug shows transport counters
-# (num_packets_received == 0 on ice_transport means the push API is broken).
+testapp/build/install/testapp/bin/testapp &      # http://localhost:8080 (browser offers)
+testapp/build/install/testapp/bin/conference &   # http://localhost:8081 (SFU offers)
 ```
 
-## What's next (media phase)
+They share the single ICE UDP port (10000), so **run one at a time**.
 
-Port order (see `DECISIONS.md` §7): nlj media-path nodes (`RtpReceiver/Sender`,
-incoming/outgoing chains, `Transceiver`), rtcp/codec/BWE subtrees, then
-`cc/` bitrate control, then extend `com.igrium.sfu` with `MediaTrack`
-(decrypted-RTP forwarding via `onRtpPacket`, host injection via `sendRtp`) and the
-media-related observer callbacks. Wire `setSrtpInformation` where
-`SfuPeerConnection.setupDtlsTransport` leaves a TODO, and route non-DTLS ICE traffic
-(currently dropped) into the transceiver.
+- `testapp`: drive two browser contexts at `/`. Both must reach ICE connected + data channel
+  open, messages sent from each must arrive at the other, and with
+  `--use-fake-device-for-media-stream` each must see `inbound-rtp` audio *and* video with
+  `bytesReceived > 0`.
+- `conference`: drive three contexts at `/`. Each must reach `testState.dcOpen` (the data
+  channel is created by the *server*), end up with `testState.remoteStreams.length == 2`
+  without ever offering, and receive media; closing one context must drop exactly that entry
+  from the others' `remoteStreams` while media keeps flowing between the survivors.
+
+`/debug` shows transport counters on both (`num_packets_received == 0` on `ice_transport`
+means the push API is broken); the conference demo also lists each participant's transceivers.
+
+## Signalling directions the API supports
+
+Both are exercised by a demo; keep both working.
+
+| | `DemoSfu` | `ConferenceSfu` |
+|---|---|---|
+| Role | `ANSWERER` | `OFFERER` |
+| Media declared via | `addReceiveTrack` / `createSendTrack` | `addTransceiver` (`MediaTransceiver`) |
+| SDP built with | `SdpUtils.buildAnswer` | `SdpUtils.buildOffer(local, List<MediaSection>)` |
+| Data channel | opened by the browser | created by the **SFU**, in the initial offer |
+| Renegotiation | needs the browser to re-offer | SFU re-offers over its own data channel |
+
+Things that bite in the offerer direction:
+
+- **Section order is load-bearing.** JSEP forbids reordering or dropping `m=` sections between
+  offers, which is why `MediaTransceiver.stop()` keeps the transceiver in `getTransceivers()`
+  and its section is re-emitted as rejected (port 0). Reserve the data channel's mid
+  (`getDataChannelMid()`) *before* adding transceivers so it stays section 0.
+- **Don't re-apply transport parameters on renegotiation.** A re-offer that only changes media
+  reuses the established ICE/DTLS transport; `setRemoteDescription` belongs to the initial
+  exchange (or an ICE restart) only.
+- **The browser attaches its media with `replaceTrack`**, not `addTrack`: the SFU offers the
+  uplink as `recvonly`, the browser flips that transceiver to `sendonly` and replaces the track.
+  `addTrack` would create sections of its own and force the browser to offer.
+- **Extension ids must be unique across all bundled sections**, audio and video alike.
+- Because only the SFU offers, **glare is impossible** — worth preserving in any new demo.
